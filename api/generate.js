@@ -1,42 +1,118 @@
-// This file lives in /api and runs securely on the server.
+function detectQuestionBank(text) {
+  const signals = [
+    /\bCO\d\b/i,
+    /\bRBT\b/i,
+    /Marks\s*:/i,
+    /Q\.?\s?No\.?/i,
+  ];
+  const hits = signals.reduce((count, re) => count + (re.test(text) ? 1 : 0), 0);
+  return hits >= 2;
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { text, mode } = req.body;
+  const { text, mode, options } = req.body;
 
   if (!text || !text.trim()) {
     return res.status(400).json({ error: "No notes were sent." });
   }
 
   const apiKey = process.env.GROQ_API_KEY;
-
   if (!apiKey) {
-    return res
-      .status(500)
-      .json({ error: "Server is missing GROQ_API_KEY." });
+    return res.status(500).json({ error: "Server is missing GROQ_API_KEY." });
   }
 
-  const instructions = {
-    flashcards: `Read the study notes below and create 8-12 flashcards.
+  const isQuestionBank = detectQuestionBank(text);
 
-Each flashcard must contain:
-- question
-- answer
-- source (quote or mention where it came from)
+  const commonRules = `The notes contain source markers like [PAGE 3] or [SLIDE 3]. For each item, find the nearest preceding marker and report it in the "page" field. For page markers, use only the number. For slide markers, use "Slide N". Never include the marker text itself in your output.
+
+Only use content relevant to studying: definitions, derivations, formulae, numericals, key concepts, and likely exam questions.
+
+Completely ignore and never create content about:
+- Cover pages or college/university information
+- Scheme of examination or administrative rules
+- Names of exam controllers, deans, or any administrative roles
+- Repeated headers or footers
+${isQuestionBank ? "\nThis document appears to be a question bank. Prioritize generating content directly from the actual listed exam questions rather than inventing new ones." : ""}`;
+
+  const focusLine = options?.focusTopic
+    ? `\nFocus specifically on the topic: "${options.focusTopic}". Ignore unrelated content.`
+    : "";
+
+  const avoidFlashcardsLine = options?.avoidQuestions?.length
+    ? `\nDo not repeat any of these existing flashcard questions:\n${options.avoidQuestions
+        .slice(0, 40)
+        .map((question) => `- ${question}`)
+        .join("\n")}\nIf the notes do not contain enough new meaningful material, return an empty "flashcards" array.`
+    : "";
+
+  const extraBatchLine = options?.extraBatch
+    ? "\nGenerate a fresh follow-up batch of new flashcards from uncovered details, not a restatement of the first obvious points."
+    : "";
+
+  const instructions = {
+    flashcards: `Read the study notes below and create 8-12 flashcards for exam preparation.
+
+${commonRules}${focusLine}${avoidFlashcardsLine}${extraBatchLine}
 
 Respond ONLY with valid JSON in exactly this format:
 
 {
   "flashcards": [
-    {
-      "question": "...",
-      "answer": "...",
-      "source": "..."
-    }
+    { "question": "...", "answer": "...", "page": 3 }
   ]
+}`,
+
+    revision: `Read the study notes below and create a concise revision summary for last-minute exam prep.
+
+${commonRules}
+
+Structure the output using these types: "Definition", "Formula", "Derivation", "FAQ", "OneLiner", "CommonMistake". Skip a type if nothing relevant exists.
+
+- Definition: key term + short definition
+- Formula: formula, variables, units - all in "content"
+- Derivation: name only (e.g. "EMF equation"), short summary in "content"
+- FAQ: a commonly-asked exam question, short answer in "content"
+- OneLiner: a single punchy revision sentence
+- CommonMistake: something students often confuse, phrased as "X != Y"
+
+Respond ONLY with valid JSON in exactly this format:
+
+{
+  "revision": [
+    { "type": "Definition", "title": "...", "content": "...", "page": 3 }
+  ]
+}`,
+
+    quiz: `Read the study notes below and create 8-12 exam-style quiz questions.
+
+${commonRules}${focusLine}
+
+Difficulty requested: ${options?.difficulty || "medium"}.
+- easy = definitions and basic recall
+- medium = concepts, comparisons, explanations
+- hard = derivations, numericals, applied problems
+
+Question types to include: ${(options?.types || ["mcq"]).join(", ")}. Only generate these types, distributed roughly evenly.
+
+Give each question a short "topic" field (2-4 words, e.g. "Transformer Losses") so similar questions can be grouped later.
+
+Use exactly these fields per type:
+
+- mcq: { "type": "mcq", "topic": "...", "difficulty": "...", "question": "...", "options": ["...","...","...","..."], "correctIndex": 0, "optionNotes": ["why option 0 is right/wrong", "...", "...", "..."], "explanation": "...", "relatedConcept": "... or omit", "page": 3 }
+- true_false: { "type": "true_false", "topic": "...", "difficulty": "...", "question": "...", "options": ["True","False"], "correctIndex": 0, "explanation": "...", "page": 3 }
+- fill_blank: { "type": "fill_blank", "topic": "...", "difficulty": "...", "question": "... use ____ for the blank ...", "correctAnswer": "...", "acceptableAnswers": ["...alt wordings..."], "explanation": "...", "page": 3 }
+- short_answer: { "type": "short_answer", "topic": "...", "difficulty": "...", "question": "...", "modelAnswer": "...", "explanation": "...", "page": 3 }
+- numerical: { "type": "numerical", "topic": "...", "difficulty": "...", "question": "...", "modelAnswer": "... include worked steps and final value ...", "explanation": "...", "page": 3 }
+- select_all: { "type": "select_all", "topic": "...", "difficulty": "...", "question": "select all that apply...", "options": ["...","...","...","..."], "correctIndices": [0,2], "optionNotes": ["...","...","...","..."], "explanation": "...", "page": 3 }
+
+Respond ONLY with valid JSON in exactly this format:
+
+{
+  "quiz": [ ...array of question objects using the fields above... ]
 }`,
   };
 
@@ -57,12 +133,7 @@ ${text}`;
         },
         body: JSON.stringify({
           model: "llama-3.3-70b-versatile",
-          messages: [
-            {
-              role: "user",
-              content: prompt,
-            },
-          ],
+          messages: [{ role: "user", content: prompt }],
           temperature: 0.3,
         }),
       }
@@ -71,32 +142,22 @@ ${text}`;
     if (!response.ok) {
       const errorText = await response.text();
       console.error("Groq API Error:", errorText);
-
-      return res
-        .status(500)
-        .json({ error: "The AI service returned an error." });
+      return res.status(500).json({ error: "The AI service returned an error." });
     }
 
     const data = await response.json();
-
     const raw = data.choices?.[0]?.message?.content;
 
     if (!raw) {
-      return res
-        .status(500)
-        .json({ error: "No response received from the AI." });
+      return res.status(500).json({ error: "No response received from the AI." });
     }
 
     const cleaned = raw.replace(/```json|```/g, "").trim();
-
     const parsed = JSON.parse(cleaned);
 
     return res.status(200).json(parsed);
   } catch (err) {
     console.error(err);
-
-    return res
-      .status(500)
-      .json({ error: "Could not generate flashcards." });
+    return res.status(500).json({ error: "Could not generate study material." });
   }
 }
