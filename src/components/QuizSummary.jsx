@@ -1,6 +1,6 @@
 import { getWeakTopics } from "../utils/weakTopics";
 
-export default function QuizSummary({ summary, onGenerateFlashcardsForTopic, onRetake }) {
+export default function QuizSummary({ summary, onGenerateFlashcardsForTopic, onRetake, onSaveResult, saveStatus }) {
   const weak = getWeakTopics();
 
   function formatTime(s) {
@@ -56,7 +56,14 @@ export default function QuizSummary({ summary, onGenerateFlashcardsForTopic, onR
         </div>
       )}
 
-      <button className="generate-btn mt-4" onClick={onRetake}>Take Another Quiz</button>
+      <div className="flashcard-actions mt-4">
+        <button className="secondary" onClick={onSaveResult}>
+          Save results
+        </button>
+        <button className="generate-btn" onClick={onRetake}>Take Another Quiz</button>
+      </div>
+
+      {saveStatus && <p className="mt-2 text-sm mono text-center">{saveStatus}</p>}
     </div>
   );
 }

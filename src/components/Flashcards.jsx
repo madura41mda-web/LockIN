@@ -18,6 +18,8 @@ export default function Flashcards({
   onGenerateMore,
   loadingMore,
   endMessage,
+  onSaveDeck,
+  saveStatus,
 }) {
   const [index, setIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
@@ -77,8 +79,12 @@ export default function Flashcards({
         <button type="button" className="secondary" onClick={onGenerateMore} disabled={loadingMore || Boolean(endMessage)}>
           {loadingMore ? "Generating..." : "More cards"}
         </button>
+        <button type="button" className="secondary" onClick={onSaveDeck}>
+          Save deck
+        </button>
       </div>
 
+      {saveStatus && <p className="mt-2 text-sm mono text-center">{saveStatus}</p>}
       {endMessage && <p className="flashcard-end-message">{endMessage}</p>}
     </div>
   );

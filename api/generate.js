@@ -1,3 +1,7 @@
+export const config = {
+  maxDuration: 60,
+};
+
 function detectQuestionBank(text) {
   const signals = [
     /\bCO\d\b/i,

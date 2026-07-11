@@ -70,7 +70,7 @@ async function extractPptxText(file) {
   return slides.join("");
 }
 
-export default function FileUpload({ noteText, setNoteText }) {
+export default function FileUpload({ noteText, setNoteText, onFileRead }) {
   const [fileName, setFileName] = useState("");
   const [extracting, setExtracting] = useState(false);
   const [uploadError, setUploadError] = useState("");
@@ -90,16 +90,19 @@ export default function FileUpload({ noteText, setNoteText }) {
       if (file.type === "text/plain" || ext === "txt" || ext === "md") {
         const text = await file.text();
         setNoteText(text);
+        onFileRead?.(file.name);
         return;
       }
 
       if (file.type === "application/pdf" || ext === "pdf") {
         setNoteText(await extractPdfText(file));
+        onFileRead?.(file.name);
         return;
       }
 
       if (ext === "pptx") {
         setNoteText(await extractPptxText(file));
+        onFileRead?.(file.name);
         return;
       }
 
@@ -111,6 +114,7 @@ export default function FileUpload({ noteText, setNoteText }) {
     } catch (err) {
       setFileName("");
       setNoteText("");
+      onFileRead?.(null);
       setUploadError(err.message || "Could not read this file.");
       if (fileInputRef.current) fileInputRef.current.value = "";
     } finally {
@@ -121,6 +125,7 @@ export default function FileUpload({ noteText, setNoteText }) {
   function removeFile() {
     setFileName("");
     setNoteText("");
+    onFileRead?.(null);
     setUploadError("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   }

@@ -8,7 +8,11 @@ import QuizSetup from "./components/QuizSetup";
 import Quiz from "./components/Quiz";
 import QuizSummary from "./components/QuizSummary";
 import QuickRevision from "./components/QuickRevision";
+import Auth from "./components/Auth";
+import MyLibrary from "./components/MyLibrary";
+import BattleMode from "./components/battle/BattleMode";
 import { parseModules } from "./utils/parseModules";
+import { supabase } from "./supabaseClient";
 
 const FEATURES = [
   {
@@ -46,6 +50,13 @@ function getModeFromHash() {
 }
 
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [pendingAction, setPendingAction] = useState(null);
+  const [saveStatus, setSaveStatus] = useState("");
+  const [profile, setProfile] = useState(null);
+
   const [noteText, setNoteText] = useState("");
   const [modules, setModules] = useState({});
   const [selectedModule, setSelectedModule] = useState("");
@@ -63,7 +74,81 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const [currentDocumentId, setCurrentDocumentId] = useState(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [battleOpen, setBattleOpen] = useState(false);
+  const [pendingBattleCode, setPendingBattleCode] = useState(null);
+
+  // Track login state, but never block the app on it
   useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthLoading(false);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      if (newSession) {
+        setAuthModalOpen(false);
+      }
+    });
+
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  // Once logged in, if there was something waiting to be saved, save it now
+  useEffect(() => {
+    if (session && pendingAction) {
+      pendingAction();
+      setPendingAction(null);
+    }
+  }, [session, pendingAction]);
+
+  // Fetch (or create) the user's profile row once logged in
+  useEffect(() => {
+    if (!session) {
+      setProfile(null);
+      return;
+    }
+
+    async function loadProfile() {
+      const { data } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", session.user.id)
+        .single();
+
+      if (data) {
+        setProfile(data);
+        return;
+      }
+
+      const fallbackUsername =
+        session.user.user_metadata?.full_name ||
+        session.user.email?.split("@")[0] ||
+        "Student";
+
+      const { data: created, error: insertError } = await supabase
+        .from("profiles")
+        .insert({ id: session.user.id, username: fallbackUsername })
+        .select()
+        .single();
+
+      if (!insertError) setProfile(created);
+    }
+
+    loadProfile();
+  }, [session]);
+
+  useEffect(() => {
+    const joinMatch = window.location.hash.match(/^#\/battle-join\/([A-Za-z0-9]+)/);
+    if (joinMatch) {
+      setPendingBattleCode(joinMatch[1].toUpperCase());
+      setBattleOpen(true);
+      window.history.replaceState(null, "", "#/flashcards");
+      return;
+    }
+
     if (!window.location.hash) {
       window.history.replaceState(null, "", "#/flashcards");
     }
@@ -76,6 +161,15 @@ export default function App() {
     window.addEventListener("hashchange", syncModeFromHash);
     return () => window.removeEventListener("hashchange", syncModeFromHash);
   }, []);
+
+  function requireLogin(action) {
+    if (session) {
+      action();
+    } else {
+      setPendingAction(() => action);
+      setAuthModalOpen(true);
+    }
+  }
 
   function handleNoteTextChange(text) {
     setNoteText(text);
@@ -94,6 +188,7 @@ export default function App() {
     setQuizQuestions(null);
     setQuizSummaryData(null);
     setError(null);
+    setSaveStatus("");
   }
 
   function switchMode(mode) {
@@ -171,6 +266,7 @@ export default function App() {
     setQuizStage("setup");
     setQuizQuestions(null);
     setQuizSummaryData(null);
+    setSaveStatus("");
   }
 
   async function handleGenerateFlashcardsForTopic(topic) {
@@ -232,13 +328,96 @@ export default function App() {
     }
   }
 
+  // FileUpload still reports the file name after a successful read, but we no
+  // longer persist a "documents" row for it — My Library groups by an editable
+  // subject name instead of source file, which doesn't need this.
+  function handleFileRead() {
+    setCurrentDocumentId(null);
+  }
+
+  // Save handlers — gated behind login via requireLogin
+  function handleSaveQuizResult() {
+    requireLogin(async () => {
+      setSaveStatus("Saving...");
+      const { error } = await supabase.from("quiz_attempts").insert({
+        user_id: session.user.id,
+        module_name: displayModuleName,
+        subject: displayModuleName,
+        score: quizSummaryData.score,
+        total_questions: quizSummaryData.total,
+        questions: quizQuestions,
+      });
+      setSaveStatus(error ? "Could not save. Try again." : "Saved!");
+    });
+  }
+
+  function handleSaveFlashcardDeck() {
+    requireLogin(async () => {
+      setSaveStatus("Saving...");
+      const { error } = await supabase.from("flashcard_decks").insert({
+        user_id: session.user.id,
+        module_name: displayModuleName,
+        subject: displayModuleName,
+        cards: flashcards,
+      });
+      setSaveStatus(error ? "Could not save. Try again." : "Saved!");
+    });
+  }
+
+  async function handleUsernameChange(newUsername) {
+    if (!session || !profile) return;
+    const { data, error } = await supabase
+      .from("profiles")
+      .update({ username: newUsername, updated_at: new Date().toISOString() })
+      .eq("id", session.user.id)
+      .select()
+      .single();
+
+    if (!error) setProfile(data);
+  }
+
+  function handleOpenDeckFromLibrary(cards, moduleName) {
+    setFlashcards(cards);
+    setFlashcardEndMessage("");
+    setActiveMode("flashcards");
+    window.location.hash = "/flashcards";
+    setLibraryOpen(false);
+  }
+
   const displayModuleName = selectedModule === "__ALL__" ? "Entire Syllabus" : selectedModule;
   const activeFeature = FEATURES.find((feature) => feature.id === activeMode) || FEATURES[0];
   const ActiveIcon = activeFeature.icon;
 
+  if (authLoading) {
+    return <div className="min-h-screen p-6" />;
+  }
+
   return (
     <div className="min-h-screen p-6">
-      <Navbar />
+      <Navbar
+        userEmail={session?.user?.email}
+        onLoginClick={() => setAuthModalOpen(true)}
+        username={profile?.username}
+        onUsernameChange={handleUsernameChange}
+        onLibraryClick={() => setLibraryOpen(true)}
+        onBattleClick={() => requireLogin(() => setBattleOpen(true))}
+      />
+
+      {authModalOpen && (
+        <div className="auth-modal-overlay" onClick={() => setAuthModalOpen(false)}>
+          <div className="auth-modal-box" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="auth-modal-close"
+              onClick={() => setAuthModalOpen(false)}
+              aria-label="Close"
+            >
+              ✕
+            </button>
+            <Auth />
+          </div>
+        </div>
+      )}
 
       <div className="mt-10">
         <h2 className="hero-title">Focus. Learn. Ace.</h2>
@@ -271,77 +450,103 @@ export default function App() {
         })}
       </nav>
 
-      <main className="feature-page">
-        <header className="feature-page-header">
-          <div>
-            <span className="setup-label">{activeFeature.id}_page</span>
-            <h3 className="feature-page-title">{activeFeature.title}</h3>
-            <p className="feature-page-copy">{activeFeature.description}</p>
-          </div>
-          <div className="feature-page-icon" aria-hidden="true">
-            <ActiveIcon size={28} />
-          </div>
-        </header>
+      {battleOpen ? (
+        <BattleMode
+          session={session}
+          profile={profile}
+          noteText={noteText}
+          displayModuleName={displayModuleName}
+          currentDocumentId={currentDocumentId}
+          callGenerate={callGenerate}
+          initialBattleCode={pendingBattleCode}
+          onClose={() => {
+            setBattleOpen(false);
+            setPendingBattleCode(null);
+          }}
+        />
+      ) : libraryOpen ? (
+        <MyLibrary
+          session={session}
+          onClose={() => setLibraryOpen(false)}
+          onOpenDeck={handleOpenDeckFromLibrary}
+        />
+      ) : (
+        <main className="feature-page">
+          <header className="feature-page-header">
+            <div>
+              <span className="setup-label">{activeFeature.id}_page</span>
+              <h3 className="feature-page-title">{activeFeature.title}</h3>
+              <p className="feature-page-copy">{activeFeature.description}</p>
+            </div>
+            <div className="feature-page-icon" aria-hidden="true">
+              <ActiveIcon size={28} />
+            </div>
+          </header>
 
-        <section className="study-input-panel" aria-label="Study source">
-          <FileUpload noteText={noteText} setNoteText={handleNoteTextChange} />
-          <ModuleSelector modules={modules} selectedModule={selectedModule} setSelectedModule={setSelectedModule} />
-        </section>
-
-        {activeMode !== "quiz" ? (
-          <button type="button" onClick={handleGenerateSimple} disabled={loading} className="generate-btn">
-            {loading ? (
-              <span className="btn-spinner-row"><span className="btn-spinner"></span>Generating...</span>
-            ) : (
-              activeFeature.actionLabel
-            )}
-          </button>
-        ) : null}
-
-        {error && <p className="mt-4 text-red-400 text-center mono">{error}</p>}
-
-        {activeMode === "flashcards" && flashcards && (
-          <section className="result-stage">
-            <Flashcards
-              cards={flashcards}
-              moduleName={displayModuleName}
-              onGenerateNew={handleGenerateSimple}
-              onGenerateMore={handleGenerateMoreFlashcards}
-              loadingMore={loading}
-              endMessage={flashcardEndMessage}
-            />
+          <section className="study-input-panel" aria-label="Study source">
+            <FileUpload noteText={noteText} setNoteText={handleNoteTextChange} onFileRead={handleFileRead} />
+            <ModuleSelector modules={modules} selectedModule={selectedModule} setSelectedModule={setSelectedModule} />
           </section>
-        )}
 
-        {activeMode === "revision" && revision && (
-          <section className="result-stage result-stage-wide">
-            <QuickRevision items={revision} moduleName={displayModuleName} />
-          </section>
-        )}
+          {activeMode !== "quiz" ? (
+            <button type="button" onClick={handleGenerateSimple} disabled={loading} className="generate-btn">
+              {loading ? (
+                <span className="btn-spinner-row"><span className="btn-spinner"></span>Generating...</span>
+              ) : (
+                activeFeature.actionLabel
+              )}
+            </button>
+          ) : null}
 
-        {activeMode === "quiz" && (
-          <section className="result-stage">
-            {quizStage === "setup" && <QuizSetup onStart={handleStartQuiz} loading={loading} />}
-            {quizStage === "active" && quizQuestions && (
-              <Quiz
-                questions={quizQuestions}
+          {error && <p className="mt-4 text-red-400 text-center mono">{error}</p>}
+
+          {activeMode === "flashcards" && flashcards && (
+            <section className="result-stage">
+              <Flashcards
+                cards={flashcards}
                 moduleName={displayModuleName}
-                order={quizConfig.order}
-                mode={quizConfig.mode}
-                timeLimit={quizConfig.timeLimit}
-                onFinish={handleQuizFinish}
+                onGenerateNew={handleGenerateSimple}
+                onGenerateMore={handleGenerateMoreFlashcards}
+                loadingMore={loading}
+                endMessage={flashcardEndMessage}
+                onSaveDeck={handleSaveFlashcardDeck}
+                saveStatus={saveStatus}
               />
-            )}
-            {quizStage === "summary" && quizSummaryData && (
-              <QuizSummary
-                summary={quizSummaryData}
-                onGenerateFlashcardsForTopic={handleGenerateFlashcardsForTopic}
-                onRetake={handleRetakeQuiz}
-              />
-            )}
-          </section>
-        )}
-      </main>
+            </section>
+          )}
+
+          {activeMode === "revision" && revision && (
+            <section className="result-stage result-stage-wide">
+              <QuickRevision items={revision} moduleName={displayModuleName} />
+            </section>
+          )}
+
+          {activeMode === "quiz" && (
+            <section className="result-stage">
+              {quizStage === "setup" && <QuizSetup onStart={handleStartQuiz} loading={loading} />}
+              {quizStage === "active" && quizQuestions && (
+                <Quiz
+                  questions={quizQuestions}
+                  moduleName={displayModuleName}
+                  order={quizConfig.order}
+                  mode={quizConfig.mode}
+                  timeLimit={quizConfig.timeLimit}
+                  onFinish={handleQuizFinish}
+                />
+              )}
+              {quizStage === "summary" && quizSummaryData && (
+                <QuizSummary
+                  summary={quizSummaryData}
+                  onGenerateFlashcardsForTopic={handleGenerateFlashcardsForTopic}
+                  onRetake={handleRetakeQuiz}
+                  onSaveResult={handleSaveQuizResult}
+                  saveStatus={saveStatus}
+                />
+              )}
+            </section>
+          )}
+        </main>
+      )}
     </div>
   );
 }
