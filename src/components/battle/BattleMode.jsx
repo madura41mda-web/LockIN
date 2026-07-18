@@ -1,20 +1,25 @@
 import { useEffect, useState } from "react";
 import { Swords, X } from "lucide-react";
 import { supabase } from "../../supabaseClient";
-import CreateBattleForm from "./CreateBattleForm";
+import CreateBattleForm from "./createbattleform";
 import JoinBattleForm from "./JoinBattleForm";
 import WaitingRoom from "./WaitingRoom";
 import BattleGame from "./BattleGame";
-import BattleResults from "./BattleResults";
+import BattleResults from "./battleresults";
 
 export default function BattleMode({
   session,
   noteText,
+  setNoteText,
+  modules,
+  selectedModule,
+  setSelectedModule,
   displayModuleName,
   currentDocumentId,
   callGenerate,
   initialBattleCode,
   onClose,
+  onFileRead,
 }) {
   const [stage, setStage] = useState(initialBattleCode ? "join" : "menu"); // menu | create | join
   const [roomId, setRoomId] = useState(null);
@@ -169,12 +174,17 @@ export default function BattleMode({
         <CreateBattleForm
           session={session}
           noteText={noteText}
+          setNoteText={setNoteText}
+          modules={modules}
+          selectedModule={selectedModule}
+          setSelectedModule={setSelectedModule}
           displayModuleName={displayModuleName}
           currentDocumentId={currentDocumentId}
           callGenerate={callGenerate}
           onBack={() => setStage("menu")}
           onCreated={handleRoomReady}
           onError={setError}
+          onFileRead={onFileRead}
         />
       )}
 

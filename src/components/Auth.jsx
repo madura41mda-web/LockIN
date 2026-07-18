@@ -69,6 +69,7 @@ export default function Auth() {
           email,
           password,
           options: {
+            emailRedirectTo: window.location.origin,
             data: {
               full_name: fullName.trim(),
               age: Number(age),
@@ -91,7 +92,12 @@ export default function Auth() {
 
   async function handleGoogleLogin() {
     setError(null);
-    const { error } = await supabase.auth.signInWithOAuth({ provider: "google" });
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: window.location.origin,
+      },
+    });
     if (error) setError(error.message);
   }
 

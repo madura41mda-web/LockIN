@@ -139,8 +139,9 @@ export default function FileUpload({ noteText, setNoteText, onFileRead }) {
           {extracting ? (
             <span className="file-chip-status">Reading...</span>
           ) : (
-            <button type="button" className="file-chip-remove" onClick={removeFile} aria-label="Remove file">
+            <button type="button" className="file-chip-remove" onClick={removeFile} aria-label="Remove file" style={{ display: "inline-flex", alignItems: "center", gap: "4px", marginLeft: "8px", fontWeight: "600" }}>
               <X size={14} />
+              <span>Remove</span>
             </button>
           )}
         </div>

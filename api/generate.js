@@ -14,20 +14,21 @@ function detectQuestionBank(text) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+  try {
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
 
-  const { text, mode, options } = req.body;
+    const { text, mode, options } = req.body || {};
 
-  if (!text || !text.trim()) {
-    return res.status(400).json({ error: "No notes were sent." });
-  }
+    if (!text || !text.trim()) {
+      return res.status(400).json({ error: "No notes were sent." });
+    }
 
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: "Server is missing GROQ_API_KEY." });
-  }
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Server is missing GROQ_API_KEY." });
+    }
 
   const isQuestionBank = detectQuestionBank(text);
 
@@ -156,12 +157,21 @@ ${text}`;
       return res.status(500).json({ error: "No response received from the AI." });
     }
 
-    const cleaned = raw.replace(/```json|```/g, "").trim();
+    const firstBrace = raw.indexOf("{");
+    const lastBrace = raw.lastIndexOf("}");
+    if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+      throw new Error("Invalid JSON response from AI");
+    }
+    const cleaned = raw.substring(firstBrace, lastBrace + 1).trim();
     const parsed = JSON.parse(cleaned);
 
     return res.status(200).json(parsed);
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: "Could not generate study material." });
+    return res.status(500).json({ error: err.message || "Could not generate study material." });
+  }
+  } catch (globalErr) {
+    console.error("Global API Error:", globalErr);
+    return res.status(500).json({ error: globalErr.message || "Unexpected server error." });
   }
 }

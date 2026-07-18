@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { createBattleRoom } from "./battleApi";
+import FileUpload from "../FileUpload";
+import ModuleSelector from "../ModuleSelector";
 
 const DIFFICULTIES = ["easy", "medium", "hard"];
 const COUNTS = [5, 10, 15, 20];
@@ -8,12 +10,17 @@ const TIMES = [15, 20, 25, 30];
 export default function CreateBattleForm({
   session,
   noteText,
+  setNoteText,
+  modules,
+  selectedModule,
+  setSelectedModule,
   displayModuleName,
   currentDocumentId,
   callGenerate,
   onBack,
   onCreated,
   onError,
+  onFileRead,
 }) {
   const [difficulty, setDifficulty] = useState("medium");
   const [questionCount, setQuestionCount] = useState(10);
@@ -24,7 +31,7 @@ export default function CreateBattleForm({
 
   async function handleCreate() {
     if (!noteText.trim()) {
-      onError("Upload or paste notes in the main app first — Battle Mode generates questions from whatever's currently loaded there.");
+      onError("Please upload a PDF or paste some notes first.");
       return;
     }
     setLoading(true);
@@ -85,12 +92,9 @@ export default function CreateBattleForm({
   return (
     <div className="quiz-setup">
       <div className="setup-section">
-        <span className="setup-label">Source</span>
-        <p className="feature-page-copy" style={{ margin: 0 }}>
-          {noteText.trim()
-            ? `Using currently loaded notes${displayModuleName ? ` — ${displayModuleName}` : ""}`
-            : "No notes loaded yet — go upload one on any tab first, then come back."}
-        </p>
+        <span className="setup-label">Source Notes / PDF</span>
+        <FileUpload noteText={noteText} setNoteText={setNoteText} onFileRead={onFileRead} />
+        <ModuleSelector modules={modules} selectedModule={selectedModule} setSelectedModule={setSelectedModule} />
       </div>
 
       <div className="setup-section">

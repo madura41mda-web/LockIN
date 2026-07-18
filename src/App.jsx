@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { BookOpen, Brain, Clock } from "lucide-react";
+import { useEffect, useState, useRef } from "react";
+import { BookOpen, Brain, Clock, Swords, Timer } from "lucide-react";
 import Navbar from "./components/Navbar";
 import FileUpload from "./components/FileUpload";
 import ModuleSelector from "./components/ModuleSelector";
@@ -10,7 +10,9 @@ import QuizSummary from "./components/QuizSummary";
 import QuickRevision from "./components/QuickRevision";
 import Auth from "./components/Auth";
 import MyLibrary from "./components/MyLibrary";
+import ProfileDashboard from "./components/ProfileDashboard";
 import BattleMode from "./components/battle/BattleMode";
+import FlowState, { TIMER_MODES } from "./components/FlowState";
 import { parseModules } from "./utils/parseModules";
 import { supabase } from "./supabaseClient";
 
@@ -38,6 +40,22 @@ const FEATURES = [
     description: "Build last-minute revision notes grouped by topic and source.",
     actionLabel: "Generate Quick Revision",
     icon: Clock,
+  },
+  {
+    id: "battle",
+    label: "Battle Mode",
+    title: "Battle Mode",
+    description: "Challenge a friend to a live 1v1 quiz in real-time.",
+    actionLabel: "Start Battle",
+    icon: Swords,
+  },
+  {
+    id: "flow",
+    label: "Flow State",
+    title: "Flow State",
+    description: "Deep focus productivity timer with smart study intervals.",
+    actionLabel: "Start Focus Session",
+    icon: Timer,
   },
 ];
 
@@ -76,8 +94,100 @@ export default function App() {
 
   const [currentDocumentId, setCurrentDocumentId] = useState(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [battleOpen, setBattleOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [pendingBattleCode, setPendingBattleCode] = useState(null);
+
+  // Flow State background timer states
+  const [flowActiveMode, setFlowActiveMode] = useState("pomodoro_25");
+  const [flowCustomStudy, setFlowCustomStudy] = useState(25);
+  const [flowCustomBreak, setFlowCustomBreak] = useState(5);
+  const [flowIsBreak, setFlowIsBreak] = useState(false);
+  const [flowTimeLeft, setFlowTimeLeft] = useState(25 * 60);
+  const [flowDuration, setFlowDuration] = useState(25 * 60);
+  const [flowIsRunning, setFlowIsRunning] = useState(false);
+  const [flowSessionCount, setFlowSessionCount] = useState(0);
+  const [flowTargetEndTime, setFlowTargetEndTime] = useState(null);
+
+  // Focus sound states
+  const [flowActiveSound, setFlowActiveSound] = useState("");
+  const [flowIsPlayingSound, setFlowIsPlayingSound] = useState(false);
+  const [flowVolume, setFlowVolume] = useState(0.5);
+  const [flowIsMuted, setFlowIsMuted] = useState(false);
+  const flowAudioRef = useRef(null);
+
+  // Background ambient audio loop synchronization
+  useEffect(() => {
+    const SOUND_ASSETS = {
+      rain: "https://www.soundjay.com/nature/sounds/rain-07.mp3",
+      forest: "https://www.soundjay.com/nature/sounds/forest-wind-1.mp3",
+      ocean: "https://www.soundjay.com/nature/sounds/ocean-wave-1.mp3",
+      fireplace: "https://www.soundjay.com/misc/sounds/fire-1.mp3",
+      instrumental: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3",
+    };
+
+    if (!flowActiveSound) {
+      if (flowAudioRef.current) {
+        flowAudioRef.current.pause();
+        flowAudioRef.current = null;
+      }
+      return;
+    }
+
+    const soundUrl = SOUND_ASSETS[flowActiveSound];
+    if (!flowAudioRef.current || flowAudioRef.current.src !== soundUrl) {
+      if (flowAudioRef.current) {
+        flowAudioRef.current.pause();
+      }
+      flowAudioRef.current = new Audio(soundUrl);
+      flowAudioRef.current.loop = true;
+    }
+
+    flowAudioRef.current.volume = flowIsMuted ? 0 : flowVolume;
+
+    if (flowIsPlayingSound) {
+      flowAudioRef.current.play().catch((err) => console.error("Audio play failed:", err));
+    } else {
+      flowAudioRef.current.pause();
+    }
+  }, [flowActiveSound, flowIsPlayingSound, flowVolume, flowIsMuted]);
+
+  // Background timer ticking synchronization
+  const handleFlowSessionEnd = () => {
+    if (!flowIsBreak) {
+      setFlowIsBreak(true);
+      const breakMins = flowActiveMode === "custom" ? flowCustomBreak : TIMER_MODES[flowActiveMode].break;
+      const secs = breakMins * 60;
+      setFlowTimeLeft(secs);
+      setFlowDuration(secs);
+      setFlowTargetEndTime(Date.now() + secs * 1000);
+      setFlowSessionCount((prev) => prev + 1);
+    } else {
+      setFlowIsBreak(false);
+      const studyMins = flowActiveMode === "custom" ? flowCustomStudy : TIMER_MODES[flowActiveMode].study;
+      const secs = studyMins * 60;
+      setFlowTimeLeft(secs);
+      setFlowDuration(secs);
+      setFlowTargetEndTime(Date.now() + secs * 1000);
+    }
+  };
+
+  useEffect(() => {
+    let timerId = null;
+    if (flowIsRunning && flowTargetEndTime) {
+      const tick = () => {
+        const remaining = Math.max(0, Math.round((flowTargetEndTime - Date.now()) / 1000));
+        setFlowTimeLeft(remaining);
+        if (remaining <= 0) {
+          clearInterval(timerId);
+          handleFlowSessionEnd();
+        }
+      };
+
+      tick();
+      timerId = setInterval(tick, 1000);
+    }
+    return () => clearInterval(timerId);
+  }, [flowIsRunning, flowTargetEndTime, flowIsBreak, flowActiveMode, flowCustomStudy, flowCustomBreak]);
 
   // Track login state, but never block the app on it
   useEffect(() => {
@@ -141,11 +251,21 @@ export default function App() {
   }, [session]);
 
   useEffect(() => {
+    if (activeMode === "battle" && !authLoading && !session) {
+      switchMode("flashcards");
+    }
+  }, [session, authLoading, activeMode]);
+
+  useEffect(() => {
     const joinMatch = window.location.hash.match(/^#\/battle-join\/([A-Za-z0-9]+)/);
     if (joinMatch) {
       setPendingBattleCode(joinMatch[1].toUpperCase());
-      setBattleOpen(true);
-      window.history.replaceState(null, "", "#/flashcards");
+      requireLogin(() => {
+        switchMode("battle");
+      });
+      setLibraryOpen(false);
+      setProfileOpen(false);
+      window.history.replaceState(null, "", "#/battle");
       return;
     }
 
@@ -196,6 +316,16 @@ export default function App() {
     setActiveMode(mode);
     resetAllOutputs();
     window.location.hash = `/${mode}`;
+    setLibraryOpen(false);
+    setProfileOpen(false);
+  }
+
+  function handleFeatureClick(id) {
+    if (id === "battle") {
+      requireLogin(() => switchMode("battle"));
+    } else {
+      switchMode(id);
+    }
   }
 
   function getSelectedText() {
@@ -208,9 +338,23 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: getSelectedText(), mode, options }),
     });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Something went wrong.");
-    return data;
+
+    if (!response.ok) {
+      let errMsg = "Something went wrong.";
+      try {
+        const data = await response.json();
+        errMsg = data.error || errMsg;
+      } catch (e) {
+        errMsg = `Server error (${response.status}): ${response.statusText || "Internal Server Error"}`;
+      }
+      throw new Error(errMsg);
+    }
+
+    try {
+      return await response.json();
+    } catch (e) {
+      throw new Error("Failed to parse server response.");
+    }
   }
 
   async function handleGenerateSimple() {
@@ -228,7 +372,25 @@ export default function App() {
         setFlashcards(data.flashcards);
         setFlashcardEndMessage("");
       }
-      if (activeMode === "revision") setRevision(data.revision);
+      if (activeMode === "revision") {
+        setRevision(data.revision);
+        try {
+          const revCountKey = `lockin_rev_count_${session?.user?.id || 'anon'}`;
+          const currentCount = parseInt(localStorage.getItem(revCountKey) || '0', 10);
+          localStorage.setItem(revCountKey, (currentCount + 1).toString());
+
+          const logKey = `lockin_rev_logs_${session?.user?.id || 'anon'}`;
+          const logs = JSON.parse(localStorage.getItem(logKey) || '[]');
+          logs.unshift({
+            id: Date.now().toString(),
+            module_name: displayModuleName,
+            created_at: new Date().toISOString()
+          });
+          localStorage.setItem(logKey, JSON.stringify(logs.slice(0, 30)));
+        } catch(e) {
+          console.error("Failed to update revision stats", e);
+        }
+      }
     } catch (err) {
       console.error(err);
       setError(err.message || "Could not reach the server.");
@@ -382,6 +544,7 @@ export default function App() {
     setActiveMode("flashcards");
     window.location.hash = "/flashcards";
     setLibraryOpen(false);
+    setProfileOpen(false);
   }
 
   const displayModuleName = selectedModule === "__ALL__" ? "Entire Syllabus" : selectedModule;
@@ -399,8 +562,8 @@ export default function App() {
         onLoginClick={() => setAuthModalOpen(true)}
         username={profile?.username}
         onUsernameChange={handleUsernameChange}
-        onLibraryClick={() => setLibraryOpen(true)}
-        onBattleClick={() => requireLogin(() => setBattleOpen(true))}
+        onLibraryClick={() => { setLibraryOpen(true); setProfileOpen(false); }}
+        onProfileClick={() => { setProfileOpen(true); setLibraryOpen(false); }}
       />
 
       {authModalOpen && (
@@ -435,7 +598,7 @@ export default function App() {
               type="button"
               data-feature={feature.id}
               className={`feature-tab ${isActive ? "feature-tab-active" : ""}`}
-              onClick={() => switchMode(feature.id)}
+              onClick={() => handleFeatureClick(feature.id)}
               aria-current={isActive ? "page" : undefined}
             >
               <span className="feature-tab-icon">
@@ -450,25 +613,37 @@ export default function App() {
         })}
       </nav>
 
-      {battleOpen ? (
+      {libraryOpen ? (
+        <MyLibrary
+          session={session}
+          onClose={() => setLibraryOpen(false)}
+          onOpenDeck={handleOpenDeckFromLibrary}
+        />
+      ) : profileOpen ? (
+        <ProfileDashboard
+          session={session}
+          profile={profile}
+          onUsernameChange={handleUsernameChange}
+          onClose={() => setProfileOpen(false)}
+        />
+      ) : activeMode === "battle" ? (
         <BattleMode
           session={session}
           profile={profile}
           noteText={noteText}
+          setNoteText={handleNoteTextChange}
+          modules={modules}
+          selectedModule={selectedModule}
+          setSelectedModule={setSelectedModule}
           displayModuleName={displayModuleName}
           currentDocumentId={currentDocumentId}
           callGenerate={callGenerate}
           initialBattleCode={pendingBattleCode}
           onClose={() => {
-            setBattleOpen(false);
+            switchMode("flashcards");
             setPendingBattleCode(null);
           }}
-        />
-      ) : libraryOpen ? (
-        <MyLibrary
-          session={session}
-          onClose={() => setLibraryOpen(false)}
-          onOpenDeck={handleOpenDeckFromLibrary}
+          onFileRead={handleFileRead}
         />
       ) : (
         <main className="feature-page">
@@ -483,67 +658,100 @@ export default function App() {
             </div>
           </header>
 
-          <section className="study-input-panel" aria-label="Study source">
-            <FileUpload noteText={noteText} setNoteText={handleNoteTextChange} onFileRead={handleFileRead} />
-            <ModuleSelector modules={modules} selectedModule={selectedModule} setSelectedModule={setSelectedModule} />
-          </section>
+          {activeMode === "flow" ? (
+            <FlowState
+              activeMode={flowActiveMode}
+              setActiveMode={setFlowActiveMode}
+              customStudy={flowCustomStudy}
+              setCustomStudy={setFlowCustomStudy}
+              customBreak={flowCustomBreak}
+              setCustomBreak={setFlowCustomBreak}
+              isBreak={flowIsBreak}
+              setIsBreak={setFlowIsBreak}
+              timeLeft={flowTimeLeft}
+              setTimeLeft={setFlowTimeLeft}
+              duration={flowDuration}
+              setDuration={setFlowDuration}
+              isRunning={flowIsRunning}
+              setIsRunning={setFlowIsRunning}
+              sessionCount={flowSessionCount}
+              setSessionCount={setFlowSessionCount}
+              targetEndTime={flowTargetEndTime}
+              setTargetEndTime={setFlowTargetEndTime}
+              activeSound={flowActiveSound}
+              setActiveSound={setFlowActiveSound}
+              isPlayingSound={flowIsPlayingSound}
+              setIsPlayingSound={setFlowIsPlayingSound}
+              volume={flowVolume}
+              setVolume={setFlowVolume}
+              isMuted={flowIsMuted}
+              setIsMuted={setFlowIsMuted}
+            />
+          ) : (
+            <>
+              <section className="study-input-panel" aria-label="Study source">
+                <FileUpload noteText={noteText} setNoteText={handleNoteTextChange} onFileRead={handleFileRead} />
+                <ModuleSelector modules={modules} selectedModule={selectedModule} setSelectedModule={setSelectedModule} />
+              </section>
 
-          {activeMode !== "quiz" ? (
-            <button type="button" onClick={handleGenerateSimple} disabled={loading} className="generate-btn">
-              {loading ? (
-                <span className="btn-spinner-row"><span className="btn-spinner"></span>Generating...</span>
-              ) : (
-                activeFeature.actionLabel
+              {activeMode !== "quiz" ? (
+                <button type="button" onClick={handleGenerateSimple} disabled={loading} className="generate-btn">
+                  {loading ? (
+                    <span className="btn-spinner-row"><span className="btn-spinner"></span>Generating...</span>
+                  ) : (
+                    activeFeature.actionLabel
+                  )}
+                </button>
+              ) : null}
+
+              {error && <p className="mt-4 text-red-400 text-center mono">{error}</p>}
+
+              {activeMode === "flashcards" && flashcards && (
+                <section className="result-stage">
+                  <Flashcards
+                    cards={flashcards}
+                    moduleName={displayModuleName}
+                    onGenerateNew={handleGenerateSimple}
+                    onGenerateMore={handleGenerateMoreFlashcards}
+                    loadingMore={loading}
+                    endMessage={flashcardEndMessage}
+                    onSaveDeck={handleSaveFlashcardDeck}
+                    saveStatus={saveStatus}
+                  />
+                </section>
               )}
-            </button>
-          ) : null}
 
-          {error && <p className="mt-4 text-red-400 text-center mono">{error}</p>}
-
-          {activeMode === "flashcards" && flashcards && (
-            <section className="result-stage">
-              <Flashcards
-                cards={flashcards}
-                moduleName={displayModuleName}
-                onGenerateNew={handleGenerateSimple}
-                onGenerateMore={handleGenerateMoreFlashcards}
-                loadingMore={loading}
-                endMessage={flashcardEndMessage}
-                onSaveDeck={handleSaveFlashcardDeck}
-                saveStatus={saveStatus}
-              />
-            </section>
-          )}
-
-          {activeMode === "revision" && revision && (
-            <section className="result-stage result-stage-wide">
-              <QuickRevision items={revision} moduleName={displayModuleName} />
-            </section>
-          )}
-
-          {activeMode === "quiz" && (
-            <section className="result-stage">
-              {quizStage === "setup" && <QuizSetup onStart={handleStartQuiz} loading={loading} />}
-              {quizStage === "active" && quizQuestions && (
-                <Quiz
-                  questions={quizQuestions}
-                  moduleName={displayModuleName}
-                  order={quizConfig.order}
-                  mode={quizConfig.mode}
-                  timeLimit={quizConfig.timeLimit}
-                  onFinish={handleQuizFinish}
-                />
+              {activeMode === "revision" && revision && (
+                <section className="result-stage result-stage-wide">
+                  <QuickRevision items={revision} moduleName={displayModuleName} />
+                </section>
               )}
-              {quizStage === "summary" && quizSummaryData && (
-                <QuizSummary
-                  summary={quizSummaryData}
-                  onGenerateFlashcardsForTopic={handleGenerateFlashcardsForTopic}
-                  onRetake={handleRetakeQuiz}
-                  onSaveResult={handleSaveQuizResult}
-                  saveStatus={saveStatus}
-                />
+
+              {activeMode === "quiz" && (
+                <section className="result-stage">
+                  {quizStage === "setup" && <QuizSetup onStart={handleStartQuiz} loading={loading} />}
+                  {quizStage === "active" && quizQuestions && (
+                    <Quiz
+                      questions={quizQuestions}
+                      moduleName={displayModuleName}
+                      order={quizConfig.order}
+                      mode={quizConfig.mode}
+                      timeLimit={quizConfig.timeLimit}
+                      onFinish={handleQuizFinish}
+                    />
+                  )}
+                  {quizStage === "summary" && quizSummaryData && (
+                    <QuizSummary
+                      summary={quizSummaryData}
+                      onGenerateFlashcardsForTopic={handleGenerateFlashcardsForTopic}
+                      onRetake={handleRetakeQuiz}
+                      onSaveResult={handleSaveQuizResult}
+                      saveStatus={saveStatus}
+                    />
+                  )}
+                </section>
               )}
-            </section>
+            </>
           )}
         </main>
       )}

@@ -19,24 +19,47 @@
   --feature-bg: rgba(18, 22, 29, 0.82);
   --feature-page-bg: rgba(18, 22, 29, 0.62);
   --feature-active-bg: linear-gradient(180deg, rgba(255, 180, 84, 0.12), rgba(18, 22, 29, 0.92));
+  --shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #eef3f9;
+  --bg: #cbd5e1;
   --surface: #ffffff;
-  --surface-2: #f3f6fb;
-  --border: #d8e0ec;
-  --text: #172033;
-  --text-muted: #667085;
-  --accent: #d97706;
-  --accent-dim: #f1c27b;
+  --surface-2: #e2e8f0;
+  --border: #64748b;
+  --text: #0f172a;
+  --text-muted: #334155;
+  --accent: #c2410c;
+  --accent-dim: #ea580c;
   --app-bg:
-    radial-gradient(ellipse at top, #ffffff 0%, #eef3f9 62%),
-    repeating-linear-gradient(0deg, rgba(23,32,51,0.018) 0px, rgba(23,32,51,0.018) 1px, transparent 1px, transparent 4px);
-  --feature-bg: rgba(255, 255, 255, 0.88);
-  --feature-page-bg: rgba(255, 255, 255, 0.74);
-  --feature-active-bg: linear-gradient(180deg, rgba(217, 119, 6, 0.14), rgba(255, 255, 255, 0.96));
+    radial-gradient(ellipse at top, #f8fafc 0%, #cbd5e1 62%),
+    repeating-linear-gradient(0deg, rgba(15,23,42,0.015) 0px, rgba(15,23,42,0.015) 1px, transparent 1px, transparent 4px);
+  --feature-bg: rgba(255, 255, 255, 0.95);
+  --feature-page-bg: rgba(255, 255, 255, 0.85);
+  --feature-active-bg: linear-gradient(180deg, rgba(194, 65, 12, 0.12), rgba(255, 255, 255, 0.96));
+  --shadow: 0 10px 25px -5px rgba(15, 23, 42, 0.12), 0 8px 10px -6px rgba(15, 23, 42, 0.12), 0 0 0 1px rgba(15, 23, 42, 0.02);
+}
+
+/* Light Theme overrides for Tailwind classes that have poor contrast */
+:root[data-theme="light"] .text-gray-400 {
+  color: #334155 !important;
+}
+:root[data-theme="light"] .text-gray-500 {
+  color: #1e293b !important;
+}
+:root[data-theme="light"] .text-slate-500 {
+  color: #1e293b !important;
+}
+:root[data-theme="light"] .hover\:text-white:hover,
+:root[data-theme="light"] .dark\:hover\:text-white:hover {
+  color: #0f172a !important;
+}
+:root[data-theme="light"] .text-red-400 {
+  color: #b91c1c !important;
+}
+:root[data-theme="light"] .generate-btn {
+  color: #ffffff !important;
 }
 
 * { box-sizing: border-box; }
@@ -60,6 +83,7 @@ body {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 1rem;
+  box-shadow: var(--shadow);
 }
 
 .brand-icon {
@@ -153,7 +177,7 @@ body {
   max-width: 72rem;
   margin: 2rem auto 0;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 0.8rem;
 }
 
@@ -225,6 +249,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 1rem;
   background: var(--feature-page-bg);
+  box-shadow: var(--shadow);
 }
 
 .feature-page-header {
@@ -426,6 +451,7 @@ body {
   gap: 0.9rem;
   background: var(--surface);
   border: 1px solid var(--border);
+  box-shadow: var(--shadow);
 }
 
 /* corner bracket accents — reticle motif */
@@ -512,6 +538,7 @@ body {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 1rem; padding: 1.75rem;
   display: flex; flex-direction: column; gap: 1.25rem;
+  box-shadow: var(--shadow);
 }
 .setup-section { display: flex; flex-direction: column; gap: 0.5rem; }
 .setup-label {
