@@ -16,6 +16,7 @@ export default function Navbar({
   onLibraryClick,
   onBattleClick,
   onProfileClick,
+  profile,
 }) {
   const [theme, setTheme] = useState(getInitialTheme);
   const isLightMode = theme === "light";
@@ -56,6 +57,7 @@ export default function Navbar({
               username={username}
               onUsernameChange={onUsernameChange}
               onProfileClick={onProfileClick}
+              profile={profile}
             />
           </>
         ) : (

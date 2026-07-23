@@ -65,6 +65,9 @@ export default function FlowState({
   setVolume,
   isMuted,
   setIsMuted,
+  ambienceLoading,
+  ambienceError,
+  onFullStop,
 }) {
   const resetTimer = (mode = activeMode) => {
     setIsRunning(false);
@@ -73,6 +76,7 @@ export default function FlowState({
     const mins = mode === "custom" ? customStudy : TIMER_MODES[mode].study;
     setTimeLeft(mins * 60);
     setDuration(mins * 60);
+    onFullStop?.();
   };
 
   const handleSkipBreak = () => {
@@ -170,6 +174,16 @@ export default function FlowState({
                 <option value="fireplace">🔥 Crackling Fire</option>
                 <option value="instrumental">🎵 Calm Instrumental</option>
               </select>
+              {ambienceLoading && (
+                <p className="text-[10px] font-mono mt-1" style={{ color: "var(--text-muted)" }}>
+                  Loading ambience…
+                </p>
+              )}
+              {ambienceError && (
+                <p className="text-[10px] font-mono mt-1" style={{ color: "#ef4444" }}>
+                  {ambienceError}
+                </p>
+              )}
             </div>
 
             {activeSound && (

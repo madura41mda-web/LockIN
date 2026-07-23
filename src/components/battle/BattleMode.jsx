@@ -39,8 +39,30 @@ export default function BattleMode({
       if (active) setRoom(data);
     }
     async function loadPlayers() {
-      const { data } = await supabase.from("battle_players").select("*").eq("room_id", roomId).order("joined_at");
-      if (active) setPlayers(data || []);
+      const { data: playersList } = await supabase.from("battle_players").select("*").eq("room_id", roomId).order("joined_at");
+      if (playersList && playersList.length > 0) {
+        const uids = playersList.map((p) => p.user_id);
+        const { data: profilesList } = await supabase.from("profiles").select("*").in("id", uids);
+        
+        const merged = playersList.map((p) => {
+          const prof = (profilesList || []).find((pr) => pr.id === p.user_id);
+          let extra = {};
+          if (prof?.username && prof.username.startsWith("JSON:")) {
+            try {
+              extra = JSON.parse(prof.username.substring(5));
+            } catch (e) {}
+          }
+          return {
+            ...p,
+            username: extra.username || prof?.username || "Player",
+            avatar: extra.avatarChoice || prof?.avatar || "0",
+            status: extra.status || prof?.status || ""
+          };
+        });
+        if (active) setPlayers(merged);
+      } else {
+        if (active) setPlayers([]);
+      }
     }
 
     loadRoom();

@@ -1,5 +1,5 @@
-import { useEffect, useState, useRef } from "react";
-import { BookOpen, Brain, Clock, Swords, Timer } from "lucide-react";
+import { useEffect, useState } from "react";
+import { BookOpen, Brain, Clock, Swords, Timer, Users } from "lucide-react";
 import Navbar from "./components/Navbar";
 import FileUpload from "./components/FileUpload";
 import ModuleSelector from "./components/ModuleSelector";
@@ -13,7 +13,9 @@ import MyLibrary from "./components/MyLibrary";
 import ProfileDashboard from "./components/ProfileDashboard";
 import BattleMode from "./components/battle/BattleMode";
 import FlowState, { TIMER_MODES } from "./components/FlowState";
+import StudyLobby from "./components/StudyLobby";
 import { parseModules } from "./utils/parseModules";
+import { useFlowAmbience, loadAmbiencePrefs } from "./utils/useFlowAmbience";
 import { supabase } from "./supabaseClient";
 
 const FEATURES = [
@@ -56,6 +58,14 @@ const FEATURES = [
     description: "Deep focus productivity timer with smart study intervals.",
     actionLabel: "Start Focus Session",
     icon: Timer,
+  },
+  {
+    id: "lobby",
+    label: "Study Lobby",
+    title: "Shared Study Room",
+    description: "Focus in real-time rooms with synced timers & status tracking.",
+    actionLabel: "Enter Study Lobby",
+    icon: Users,
   },
 ];
 
@@ -108,48 +118,69 @@ export default function App() {
   const [flowSessionCount, setFlowSessionCount] = useState(0);
   const [flowTargetEndTime, setFlowTargetEndTime] = useState(null);
 
-  // Focus sound states
-  const [flowActiveSound, setFlowActiveSound] = useState("");
+  // Focus sound states — restored from the last session where available.
+  const savedAmbiencePrefs = loadAmbiencePrefs();
+  const [flowActiveSound, setFlowActiveSound] = useState(savedAmbiencePrefs.activeSound || "");
   const [flowIsPlayingSound, setFlowIsPlayingSound] = useState(false);
-  const [flowVolume, setFlowVolume] = useState(0.5);
-  const [flowIsMuted, setFlowIsMuted] = useState(false);
-  const flowAudioRef = useRef(null);
+  const [flowVolume, setFlowVolume] = useState(
+    typeof savedAmbiencePrefs.volume === "number" ? savedAmbiencePrefs.volume : 0.5
+  );
+  const [flowIsMuted, setFlowIsMuted] = useState(Boolean(savedAmbiencePrefs.isMuted));
+  const [flowResetSignal, setFlowResetSignal] = useState(0);
 
-  // Background ambient audio loop synchronization
-  useEffect(() => {
-    const SOUND_ASSETS = {
-      rain: "https://www.soundjay.com/nature/sounds/rain-07.mp3",
-      forest: "https://www.soundjay.com/nature/sounds/forest-wind-1.mp3",
-      ocean: "https://www.soundjay.com/nature/sounds/ocean-wave-1.mp3",
-      fireplace: "https://www.soundjay.com/misc/sounds/fire-1.mp3",
-      instrumental: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3",
-    };
+  const { isLoading: flowAmbienceLoading, error: flowAmbienceError } = useFlowAmbience({
+    activeSound: flowActiveSound,
+    isPlayingSound: flowIsPlayingSound,
+    volume: flowVolume,
+    isMuted: flowIsMuted,
+    stopSignal: flowResetSignal,
+  });
 
-    if (!flowActiveSound) {
-      if (flowAudioRef.current) {
-        flowAudioRef.current.pause();
-        flowAudioRef.current = null;
+  // Study tracking helper utilities
+  function updateStudyStreak(userId) {
+    const streakKey = `lockin_study_streak_${userId}`;
+    const lastActiveKey = `lockin_last_active_date_${userId}`;
+    try {
+      const today = new Date().toDateString();
+      const lastActive = localStorage.getItem(lastActiveKey);
+      let streak = parseInt(localStorage.getItem(streakKey) || "0", 10);
+
+      if (lastActive === today) return;
+
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toDateString();
+
+      if (lastActive === yesterdayStr) {
+        streak += 1;
+      } else {
+        streak = 1;
       }
-      return;
-    }
 
-    const soundUrl = SOUND_ASSETS[flowActiveSound];
-    if (!flowAudioRef.current || flowAudioRef.current.src !== soundUrl) {
-      if (flowAudioRef.current) {
-        flowAudioRef.current.pause();
-      }
-      flowAudioRef.current = new Audio(soundUrl);
-      flowAudioRef.current.loop = true;
+      localStorage.setItem(streakKey, streak.toString());
+      localStorage.setItem(lastActiveKey, today);
+    } catch (e) {
+      console.error("Failed to update study streak:", e);
     }
+  }
 
-    flowAudioRef.current.volume = flowIsMuted ? 0 : flowVolume;
-
-    if (flowIsPlayingSound) {
-      flowAudioRef.current.play().catch((err) => console.error("Audio play failed:", err));
-    } else {
-      flowAudioRef.current.pause();
+  function logStudyActivity(type, detail) {
+    const userId = session?.user?.id || "anon";
+    const logKey = `lockin_activity_feed_${userId}`;
+    try {
+      const feed = JSON.parse(localStorage.getItem(logKey) || "[]");
+      feed.unshift({
+        id: Date.now().toString(),
+        type,
+        detail,
+        created_at: new Date().toISOString()
+      });
+      localStorage.setItem(logKey, JSON.stringify(feed.slice(0, 50)));
+      updateStudyStreak(userId);
+    } catch (e) {
+      console.error("Failed to log activity:", e);
     }
-  }, [flowActiveSound, flowIsPlayingSound, flowVolume, flowIsMuted]);
+  }
 
   // Background timer ticking synchronization
   const handleFlowSessionEnd = () => {
@@ -160,6 +191,25 @@ export default function App() {
       setFlowTimeLeft(secs);
       setFlowDuration(secs);
       setFlowTargetEndTime(Date.now() + secs * 1000);
+
+      const studyMins = flowActiveMode === "custom" ? flowCustomStudy : TIMER_MODES[flowActiveMode].study;
+
+      // Auto-save Focus Session
+      const userId = session?.user?.id || "anon";
+      const logKey = `lockin_focus_logs_${userId}`;
+      try {
+        const logs = JSON.parse(localStorage.getItem(logKey) || "[]");
+        logs.unshift({
+          id: Date.now().toString(),
+          duration_minutes: studyMins,
+          created_at: new Date().toISOString()
+        });
+        localStorage.setItem(logKey, JSON.stringify(logs.slice(0, 50)));
+      } catch (e) {
+        console.error("Failed to save focus session:", e);
+      }
+
+      logStudyActivity("flow", `Focused for ${studyMins} minutes in FlowState`);
       setFlowSessionCount((prev) => prev + 1);
     } else {
       setFlowIsBreak(false);
@@ -222,29 +272,88 @@ export default function App() {
     }
 
     async function loadProfile() {
-      const { data } = await supabase
+      // Check local storage backup first (offline fallback)
+      let offlineBackup = null;
+      try {
+        const localData = localStorage.getItem(`lockin_profile_offline_${session.user.id}`);
+        if (localData) {
+          offlineBackup = JSON.parse(localData);
+        }
+      } catch (e) {
+        console.error("Failed to load offline profile backup:", e);
+      }
+
+      const { data, error } = await supabase
         .from("profiles")
         .select("*")
         .eq("id", session.user.id)
         .single();
 
       if (data) {
-        setProfile(data);
+        let parsedProfile = { ...data };
+        if (data.username && data.username.startsWith("JSON:")) {
+          try {
+            const extra = JSON.parse(data.username.substring(5));
+            parsedProfile = {
+              ...parsedProfile,
+              ...extra,
+              username: extra.username || data.username
+            };
+          } catch (e) {
+            console.error("Failed to parse JSON serialized profile:", e);
+          }
+        }
+        // Merge offline updates if remote updated_at is older
+        if (offlineBackup && offlineBackup.updated_at && (!data.updated_at || new Date(offlineBackup.updated_at) > new Date(data.updated_at))) {
+          parsedProfile = { ...parsedProfile, ...offlineBackup };
+        }
+        setProfile(parsedProfile);
         return;
       }
 
+      // If we don't have remote data, try offline backup or generate new profile
       const fallbackUsername =
+        offlineBackup?.username ||
         session.user.user_metadata?.full_name ||
         session.user.email?.split("@")[0] ||
         "Student";
 
+      // If offline backup has JSON content, use it to insert
+      const insertUsername = offlineBackup && offlineBackup.username 
+        ? "JSON:" + JSON.stringify({
+            username: offlineBackup.username,
+            displayName: offlineBackup.displayName,
+            avatarChoice: offlineBackup.avatarChoice,
+            avatarCustomUrl: offlineBackup.avatarCustomUrl,
+            bio: offlineBackup.bio,
+            studyGoal: offlineBackup.studyGoal,
+            favouriteSubject: offlineBackup.favouriteSubject,
+            status: offlineBackup.status,
+            theme: offlineBackup.theme
+          })
+        : fallbackUsername;
+
       const { data: created, error: insertError } = await supabase
         .from("profiles")
-        .insert({ id: session.user.id, username: fallbackUsername })
+        .insert({ id: session.user.id, username: insertUsername })
         .select()
         .single();
 
-      if (!insertError) setProfile(created);
+      if (!insertError && created) {
+        let parsed = { ...created };
+        if (created.username && created.username.startsWith("JSON:")) {
+          try {
+            const extra = JSON.parse(created.username.substring(5));
+            parsed = { ...parsed, ...extra, username: extra.username || created.username };
+          } catch (e) {}
+        }
+        setProfile(parsed);
+      } else if (offlineBackup) {
+        // Safe fallback if insert fails (e.g. database schema is read-only)
+        setProfile(offlineBackup);
+      } else {
+        setProfile({ id: session.user.id, username: fallbackUsername });
+      }
     }
 
     loadProfile();
@@ -252,35 +361,71 @@ export default function App() {
 
   useEffect(() => {
     if (activeMode === "battle" && !authLoading && !session) {
-      switchMode("flashcards");
+      const isOauth = window.location.hash.includes("access_token=") || window.location.hash.includes("error=");
+      if (!isOauth) {
+        switchMode("flashcards");
+      }
     }
   }, [session, authLoading, activeMode]);
 
+  // Main hash routing effect
   useEffect(() => {
-    const joinMatch = window.location.hash.match(/^#\/battle-join\/([A-Za-z0-9]+)/);
-    if (joinMatch) {
-      setPendingBattleCode(joinMatch[1].toUpperCase());
-      requireLogin(() => {
-        switchMode("battle");
-      });
-      setLibraryOpen(false);
-      setProfileOpen(false);
-      window.history.replaceState(null, "", "#/battle");
-      return;
-    }
+    function handleHashRoute() {
+      const hash = window.location.hash || "";
 
-    if (!window.location.hash) {
-      window.history.replaceState(null, "", "#/flashcards");
-    }
+      // Skip parsing if this is an active OAuth token callback
+      if (hash.includes("access_token=") || hash.includes("error=") || hash.includes("type=recovery")) {
+        return;
+      }
 
-    function syncModeFromHash() {
+      // Check for live battle invitations
+      const joinMatch = hash.match(/^#\/battle-join\/([A-Za-z0-9]+)/);
+      if (joinMatch) {
+        const code = joinMatch[1].toUpperCase();
+        setPendingBattleCode(code);
+        requireLogin(() => {
+          switchMode("battle");
+        });
+        setLibraryOpen(false);
+        setProfileOpen(false);
+        window.history.replaceState(null, "", "#/battle");
+        return;
+      }
+
+      if (!hash) {
+        window.history.replaceState(null, "", "#/flashcards");
+      }
+
       setActiveMode(getModeFromHash());
       setError(null);
     }
 
-    window.addEventListener("hashchange", syncModeFromHash);
-    return () => window.removeEventListener("hashchange", syncModeFromHash);
-  }, []);
+    handleHashRoute();
+    window.addEventListener("hashchange", handleHashRoute);
+    return () => window.removeEventListener("hashchange", handleHashRoute);
+  }, [session, authLoading]);
+
+  // Clean up OAuth hashes and restore original views/join codes post-login
+  useEffect(() => {
+    const hash = window.location.hash || "";
+    const isSupabaseAuth = hash.includes("access_token=") || hash.includes("error=") || hash.includes("type=recovery");
+
+    if (isSupabaseAuth && !authLoading) {
+      let savedHash = "";
+      try {
+        savedHash = localStorage.getItem("lockin_post_oauth_hash") || "";
+        localStorage.removeItem("lockin_post_oauth_hash");
+      } catch (e) {
+        console.error("Failed to read cached hash:", e);
+      }
+
+      if (savedHash && savedHash.startsWith("#/")) {
+        window.location.hash = savedHash.substring(1);
+      } else {
+        window.location.hash = `/${activeMode}`;
+      }
+    }
+  }, [authLoading, session]);
 
   function requireLogin(action) {
     if (session) {
@@ -355,9 +500,7 @@ export default function App() {
     } catch (e) {
       throw new Error("Failed to parse server response.");
     }
-  }
-
-  async function handleGenerateSimple() {
+  }  async function handleGenerateSimple() {
     if (!noteText.trim()) {
       setError("Please upload a PDF or paste some notes first.");
       return;
@@ -371,6 +514,41 @@ export default function App() {
       if (activeMode === "flashcards") {
         setFlashcards(data.flashcards);
         setFlashcardEndMessage("");
+
+        // Auto-save to Supabase
+        if (session) {
+          setSaveStatus("Saving...");
+          const { error } = await supabase.from("flashcard_decks").insert({
+            user_id: session.user.id,
+            module_name: displayModuleName,
+            subject: displayModuleName,
+            cards: data.flashcards,
+          });
+          if (error) {
+            console.error("Auto-save flashcards failed in Supabase:", error);
+            setSaveStatus("Could not save to cloud.");
+          } else {
+            setSaveStatus("Saved!");
+          }
+        } else {
+          // Offline fallback
+          try {
+            const fcLogKey = `lockin_flashcards_offline_${session?.user?.id || 'anon'}`;
+            const decks = JSON.parse(localStorage.getItem(fcLogKey) || '[]');
+            decks.unshift({
+              id: Date.now().toString(),
+              module_name: displayModuleName,
+              subject: displayModuleName,
+              cards: data.flashcards,
+              created_at: new Date().toISOString()
+            });
+            localStorage.setItem(fcLogKey, JSON.stringify(decks.slice(0, 30)));
+            setSaveStatus("Saved locally");
+          } catch(e) {
+            console.error("Failed to auto-save flashcard deck to localStorage:", e);
+          }
+        }
+        logStudyActivity("flashcards", `Created Flashcard Deck for ${displayModuleName} (${data.flashcards.length} cards)`);
       }
       if (activeMode === "revision") {
         setRevision(data.revision);
@@ -390,6 +568,7 @@ export default function App() {
         } catch(e) {
           console.error("Failed to update revision stats", e);
         }
+        logStudyActivity("revision", `Generated Revision Summary for ${displayModuleName}`);
       }
     } catch (err) {
       console.error(err);
@@ -422,6 +601,45 @@ export default function App() {
   function handleQuizFinish(summary) {
     setQuizSummaryData(summary);
     setQuizStage("summary");
+
+    // Automatically save progress!
+    if (session) {
+      setSaveStatus("Saving...");
+      supabase.from("quiz_attempts").insert({
+        user_id: session.user.id,
+        module_name: displayModuleName,
+        subject: displayModuleName,
+        score: summary.score,
+        total_questions: summary.total,
+        questions: quizQuestions,
+      }).then(({ error }) => {
+        if (error) {
+          console.error("Auto-save quiz attempt failed in Supabase:", error);
+          setSaveStatus("Could not save to cloud.");
+        } else {
+          setSaveStatus("Saved!");
+        }
+      });
+    } else {
+      // Offline fallback
+      try {
+        const quizLogKey = `lockin_quiz_logs_offline_${session?.user?.id || 'anon'}`;
+        const logs = JSON.parse(localStorage.getItem(quizLogKey) || '[]');
+        logs.unshift({
+          id: Date.now().toString(),
+          module_name: displayModuleName,
+          subject: displayModuleName,
+          score: summary.score,
+          total_questions: summary.total,
+          created_at: new Date().toISOString()
+        });
+        localStorage.setItem(quizLogKey, JSON.stringify(logs.slice(0, 50)));
+        setSaveStatus("Saved locally");
+      } catch (e) {
+        console.error("Failed to save quiz attempt to localStorage:", e);
+      }
+    }
+    logStudyActivity("quiz", `Completed Quiz in ${displayModuleName} (Score: ${summary.score}/${summary.total})`);
   }
 
   function handleRetakeQuiz() {
@@ -493,8 +711,19 @@ export default function App() {
   // FileUpload still reports the file name after a successful read, but we no
   // longer persist a "documents" row for it — My Library groups by an editable
   // subject name instead of source file, which doesn't need this.
-  function handleFileRead() {
+  function handleFileRead(fileName) {
     setCurrentDocumentId(null);
+    if (fileName) {
+      logStudyActivity("upload", `Uploaded note file: ${fileName}`);
+      try {
+        const userId = session?.user?.id || "anon";
+        const docCountKey = `lockin_docs_uploaded_${userId}`;
+        const currentDocCount = parseInt(localStorage.getItem(docCountKey) || '0', 10);
+        localStorage.setItem(docCountKey, (currentDocCount + 1).toString());
+      } catch (e) {
+        console.error("Failed to update uploaded document count:", e);
+      }
+    }
   }
 
   // Save handlers — gated behind login via requireLogin
@@ -509,7 +738,17 @@ export default function App() {
         total_questions: quizSummaryData.total,
         questions: quizQuestions,
       });
-      setSaveStatus(error ? "Could not save. Try again." : "Saved!");
+      if (error) {
+        console.error("Supabase Error [Save Quiz Attempt]:", {
+          message: error.message,
+          code: error.code,
+          details: error.details,
+          hint: error.hint
+        });
+        setSaveStatus("Could not save. Try again.");
+      } else {
+        setSaveStatus("Saved!");
+      }
     });
   }
 
@@ -522,20 +761,84 @@ export default function App() {
         subject: displayModuleName,
         cards: flashcards,
       });
-      setSaveStatus(error ? "Could not save. Try again." : "Saved!");
+      if (error) {
+        console.error("Supabase Error [Save Flashcard Deck]:", {
+          message: error.message,
+          code: error.code,
+          details: error.details,
+          hint: error.hint
+        });
+        setSaveStatus("Could not save. Try again.");
+      } else {
+        setSaveStatus("Saved!");
+      }
     });
   }
 
-  async function handleUsernameChange(newUsername) {
+  async function handleProfileUpdate(updatedFields) {
     if (!session || !profile) return;
-    const { data, error } = await supabase
-      .from("profiles")
-      .update({ username: newUsername, updated_at: new Date().toISOString() })
-      .eq("id", session.user.id)
-      .select()
-      .single();
 
-    if (!error) setProfile(data);
+    // Create new profile object merging changes
+    const newProfile = { ...profile, ...updatedFields, updated_at: new Date().toISOString() };
+
+    // Offline local storage update
+    try {
+      localStorage.setItem(`lockin_profile_offline_${session.user.id}`, JSON.stringify(newProfile));
+    } catch(e) {
+      console.error("Failed to save offline profile:", e);
+    }
+
+    // Try updating individual columns first
+    const { error } = await supabase
+      .from("profiles")
+      .update({
+        username: newProfile.username,
+        display_name: newProfile.displayName,
+        avatar: newProfile.avatarChoice,
+        bio: newProfile.bio,
+        study_goal: newProfile.studyGoal,
+        favourite_subject: newProfile.favouriteSubject,
+        status: newProfile.status,
+        theme: newProfile.theme,
+        updated_at: newProfile.updated_at
+      })
+      .eq("id", session.user.id);
+
+    if (error) {
+      console.warn("Updating individual columns failed, attempting JSON serialization fallback...", error.message);
+
+      // Fallback: Serialize extra fields in username column
+      const serialized = JSON.stringify({
+        username: newProfile.username,
+        displayName: newProfile.displayName,
+        avatarChoice: newProfile.avatarChoice,
+        avatarCustomUrl: newProfile.avatarCustomUrl,
+        bio: newProfile.bio,
+        studyGoal: newProfile.studyGoal,
+        favouriteSubject: newProfile.favouriteSubject,
+        status: newProfile.status,
+        theme: newProfile.theme
+      });
+
+      const { error: fallbackErr } = await supabase
+        .from("profiles")
+        .update({
+          username: "JSON:" + serialized,
+          updated_at: newProfile.updated_at
+        })
+        .eq("id", session.user.id);
+
+      if (fallbackErr) {
+        console.error("Supabase Error [Update Profile (JSON fallback)]:", {
+          message: fallbackErr.message,
+          code: fallbackErr.code,
+          details: fallbackErr.details,
+          hint: fallbackErr.hint
+        });
+      }
+    }
+
+    setProfile(newProfile);
   }
 
   function handleOpenDeckFromLibrary(cards, moduleName) {
@@ -561,9 +864,10 @@ export default function App() {
         userEmail={session?.user?.email}
         onLoginClick={() => setAuthModalOpen(true)}
         username={profile?.username}
-        onUsernameChange={handleUsernameChange}
+        onUsernameChange={(u) => handleProfileUpdate({ username: u })}
         onLibraryClick={() => { setLibraryOpen(true); setProfileOpen(false); }}
         onProfileClick={() => { setProfileOpen(true); setLibraryOpen(false); }}
+        profile={profile}
       />
 
       {authModalOpen && (
@@ -623,7 +927,7 @@ export default function App() {
         <ProfileDashboard
           session={session}
           profile={profile}
-          onUsernameChange={handleUsernameChange}
+          onProfileUpdate={handleProfileUpdate}
           onClose={() => setProfileOpen(false)}
         />
       ) : activeMode === "battle" ? (
@@ -644,6 +948,14 @@ export default function App() {
             setPendingBattleCode(null);
           }}
           onFileRead={handleFileRead}
+        />
+      ) : activeMode === "lobby" ? (
+        <StudyLobby
+          session={session}
+          profile={profile}
+          currentActiveMode={activeMode}
+          flowIsRunning={flowIsRunning}
+          onClose={() => switchMode("flashcards")}
         />
       ) : (
         <main className="feature-page">
@@ -686,6 +998,9 @@ export default function App() {
               setVolume={setFlowVolume}
               isMuted={flowIsMuted}
               setIsMuted={setFlowIsMuted}
+              ambienceLoading={flowAmbienceLoading}
+              ambienceError={flowAmbienceError}
+              onFullStop={() => setFlowResetSignal((n) => n + 1)}
             />
           ) : (
             <>

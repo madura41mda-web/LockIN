@@ -92,6 +92,11 @@ export default function Auth() {
 
   async function handleGoogleLogin() {
     setError(null);
+    try {
+      localStorage.setItem("lockin_post_oauth_hash", window.location.hash || "");
+    } catch (e) {
+      console.warn("Failed to cache pre-OAuth hash:", e);
+    }
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {

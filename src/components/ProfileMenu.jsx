@@ -8,6 +8,7 @@ export default function ProfileMenu({
   userEmail,
   onUsernameChange,
   onProfileClick,
+  profile,
 }) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -48,9 +49,9 @@ export default function ProfileMenu({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const profileName = localProfile.displayName || username || userEmail?.split("@")[0] || "Account";
-  const avatarChoice = localProfile.avatarChoice || null;
-  const avatarCustomUrl = localProfile.avatarCustomUrl || null;
+  const profileName = profile?.displayName || profile?.display_name || localProfile.displayName || username || userEmail?.split("@")[0] || "Account";
+  const avatarChoice = profile?.avatarChoice || profile?.avatar || localProfile.avatarChoice || null;
+  const avatarCustomUrl = profile?.avatarCustomUrl || localProfile.avatarCustomUrl || null;
 
   async function saveUsername() {
     const trimmed = draftName.trim();

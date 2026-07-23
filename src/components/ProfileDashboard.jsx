@@ -1,14 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { 
   X, User, BookOpen, Brain, Clock, Swords, Trophy, Edit3, Check, Calendar, Activity, 
-  Sun, Moon, PenTool, Camera, Clipboard, ShieldAlert, Award
+  Sun, Moon, PenTool, Camera, Clipboard, ShieldAlert, Award, FileText
 } from "lucide-react";
 import { supabase } from "../supabaseClient";
 import Avatar from "./Avatar";
 
 const AVATAR_LABELS = ["Cyber Orange", "Retro Neon", "Cosmos Space", "Cyber Cyborg", "Golden Sage", "Emerald Owl"];
 
-export default function ProfileDashboard({ session, profile, onUsernameChange, onClose }) {
+export default function ProfileDashboard({ session, profile, onProfileUpdate, onClose }) {
   const user = session?.user;
   const userEmail = user?.email || "student@lockin.edu";
   const userId = user?.id;
@@ -18,6 +18,9 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
   const [bBio, setBBio] = useState("");
   const [avatarChoice, setAvatarChoice] = useState("0");
   const [avatarCustomUrl, setAvatarCustomUrl] = useState("");
+  const [studyGoal, setStudyGoal] = useState("");
+  const [favouriteSubject, setFavouriteSubject] = useState("");
+  const [customStatus, setCustomStatus] = useState("");
   const [isEditing, setIsEditing] = useState(false);
 
   // States for database statistics
@@ -29,7 +32,20 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
     battlesWon: 0,
     quizAccuracy: 0,
     totalSessions: 0,
+    streak: 0,
+    hoursFocused: "0.0",
+    flowSessionsCount: 0,
+    docsUploaded: 0,
+    flashcardsReviewed: 0,
+    xp: 0,
+    level: 1,
+    levelProgress: 0,
+    xpForCurrentLevel: 0,
+    xpForNextLevel: 100,
+    weeklyMinutes: [0, 0, 0, 0, 0, 0, 0],
+    heatmapWeeks: [],
   });
+  
   const [activities, setActivities] = useState([]);
   const [dbLoading, setDbLoading] = useState(true);
 
@@ -41,59 +57,54 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
   // Theme settings
   const [theme, setTheme] = useState(() => localStorage.getItem("lockin-theme") || "dark");
 
-  // Load local settings on mount
+  // Sync state from profile prop
   useEffect(() => {
-    if (userEmail) {
-      const dataStr = localStorage.getItem(`lockin_profile_${userEmail}`);
-      if (dataStr) {
-        try {
-          const data = JSON.parse(dataStr);
-          setDisplayName(data.displayName || "");
-          setBBio(data.bio || "");
-          setAvatarChoice(data.avatarChoice || "0");
-          setAvatarCustomUrl(data.avatarCustomUrl || "");
-        } catch (e) {
-          console.error("Error parsing local profile data:", e);
-        }
-      } else {
-        // Fallback display name
-        setDisplayName(profile?.username || userEmail.split("@")[0]);
-      }
-    }
-  }, [userEmail, profile]);
-
-  useEffect(() => {
-    if (profile?.username) {
-      setDraftUsername(profile.username);
+    if (profile) {
+      setDisplayName(profile.displayName || profile.display_name || "");
+      setBBio(profile.bio || "");
+      setAvatarChoice(profile.avatarChoice || profile.avatar || "0");
+      setAvatarCustomUrl(profile.avatarCustomUrl || "");
+      setStudyGoal(profile.studyGoal || "");
+      setFavouriteSubject(profile.favouriteSubject || "");
+      setCustomStatus(profile.status || "");
+      setDraftUsername(profile.username || "");
     }
   }, [profile]);
 
   // Load stats and history from DB & LocalStorage
   useEffect(() => {
-    if (!userId) return;
-    
+    const currentUserId = userId || "anon";
     let active = true;
 
     async function loadStatsAndLogs() {
       setDbLoading(true);
       try {
-        // 1. Fetch Flashcard Decks
-        const { data: decks, error: decksErr } = await supabase
-          .from("flashcard_decks")
-          .select("*")
-          .eq("user_id", userId);
-        
-        // 2. Fetch Quiz Attempts
-        const { data: attempts, error: attemptsErr } = await supabase
-          .from("quiz_attempts")
-          .select("*")
-          .eq("user_id", userId);
+        let decks = [];
+        let attempts = [];
+        let battlePlayers = [];
 
-        // 3. Fetch Battle Players rows for matches played
-        const { data: battlePlayers, error: bpErr } = await supabase
-          .from("battle_players")
-          .select("id, room_id, joined_at")
-          .eq("user_id", userId);
+        if (userId) {
+          // 1. Fetch Flashcard Decks
+          const { data: d } = await supabase
+            .from("flashcard_decks")
+            .select("*")
+            .eq("user_id", userId);
+          decks = d || [];
+          
+          // 2. Fetch Quiz Attempts
+          const { data: a } = await supabase
+            .from("quiz_attempts")
+            .select("*")
+            .eq("user_id", userId);
+          attempts = a || [];
+
+          // 3. Fetch Battle Players rows
+          const { data: bp } = await supabase
+            .from("battle_players")
+            .select("id, room_id, joined_at")
+            .eq("user_id", userId);
+          battlePlayers = bp || [];
+        }
 
         if (!active) return;
 
@@ -120,11 +131,10 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
           }
         }
 
-        // 4. Fetch Revision Stats from local storage
-        const revCountKey = `lockin_rev_count_${userId}`;
+        // 4. Fetch Revision Stats
+        const revCountKey = `lockin_rev_count_${currentUserId}`;
         const revisionsCount = parseInt(localStorage.getItem(revCountKey) || "0", 10);
-        
-        const revLogKey = `lockin_rev_logs_${userId}`;
+        const revLogKey = `lockin_rev_logs_${currentUserId}`;
         let revLogs = [];
         try {
           revLogs = JSON.parse(localStorage.getItem(revLogKey) || "[]");
@@ -132,7 +142,20 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
           console.error(e);
         }
 
-        // Compute Statistic Values
+        // 5. Fetch Focus Logs, Streak, Docs Uploaded, and Flashcards Reviewed
+        const focusLogKey = `lockin_focus_logs_${currentUserId}`;
+        let focusLogs = [];
+        try {
+          focusLogs = JSON.parse(localStorage.getItem(focusLogKey) || "[]");
+        } catch (e) {
+          console.error(e);
+        }
+        
+        const streak = parseInt(localStorage.getItem(`lockin_study_streak_${currentUserId}`) || "0", 10);
+        const docsUploaded = parseInt(localStorage.getItem(`lockin_docs_uploaded_${currentUserId}`) || "0", 10);
+        const fcReviewed = parseInt(localStorage.getItem(`lockin_flashcards_reviewed_${currentUserId}`) || "0", 10);
+
+        // 6. Compute Statistic Values
         const fcCreated = (decks || []).reduce((sum, d) => sum + (d.cards?.length || 0), 0);
         const quizCompleted = (attempts || []).length;
         const matchesCount = (battlePlayers || []).length;
@@ -146,8 +169,160 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
         }
 
         const totalStudyDecksCount = (decks || []).length;
-        // Total active sessions is sum of resources & matches
-        const totalSessions = totalStudyDecksCount + quizCompleted + matchesCount + revisionsCount;
+        const focusMinutes = focusLogs.reduce((sum, f) => sum + (f.duration_minutes || 0), 0);
+        const totalSessions = totalStudyDecksCount + quizCompleted + matchesCount + revisionsCount + focusLogs.length;
+
+        // 7. Calculate XP & RPG Level
+        // 10 XP per flashcard, 20 XP per quiz, 15 XP per revision, 50 XP per win, 20 XP per match played, 1 XP per focus minute
+        const xp = (fcCreated * 10) + (quizCompleted * 20) + (revisionsCount * 15) + (matchesWon * 50) + ((matchesCount - matchesWon) * 20) + focusMinutes;
+        const level = Math.floor(Math.sqrt(xp / 100)) + 1;
+        const xpForCurrentLevel = Math.pow(level - 1, 2) * 100;
+        const xpForNextLevel = Math.pow(level, 2) * 100;
+        const levelProgress = xpForNextLevel > xpForCurrentLevel 
+          ? ((xp - xpForCurrentLevel) / (xpForNextLevel - xpForCurrentLevel)) * 100 
+          : 0;
+
+        // 8. Compile Weekly study graph minutes (Mon-Sun)
+        const weeklyMinutes = [0, 0, 0, 0, 0, 0, 0];
+        const getDayIndex = (date) => {
+          const day = date.getDay(); // 0 Sunday, 1 Monday...
+          return day === 0 ? 6 : day - 1;
+        };
+
+        const today = new Date();
+        const startOfWeek = new Date(today);
+        // Find Monday of this week
+        const diff = today.getDate() - today.getDay() + (today.getDay() === 0 ? -6 : 1);
+        startOfWeek.setDate(diff);
+        startOfWeek.setHours(0, 0, 0, 0);
+
+        const isThisWeek = (date) => date >= startOfWeek;
+
+        (attempts || []).forEach((a) => {
+          const d = new Date(a.created_at);
+          if (isThisWeek(d)) {
+            weeklyMinutes[getDayIndex(d)] += Math.round((a.timeTakenSeconds || 180) / 60);
+          }
+        });
+
+        focusLogs.forEach((f) => {
+          const d = new Date(f.created_at);
+          if (isThisWeek(d)) {
+            weeklyMinutes[getDayIndex(d)] += (f.duration_minutes || 0);
+          }
+        });
+
+        revLogs.forEach((r) => {
+          const d = new Date(r.created_at);
+          if (isThisWeek(d)) {
+            weeklyMinutes[getDayIndex(d)] += 2; // assume 2 mins study per revision
+          }
+        });
+
+        // 9. Compile 12-Week Heatmap matrix
+        const dateCounts = {};
+        const recordDate = (date) => {
+          const key = date.toISOString().split("T")[0];
+          dateCounts[key] = (dateCounts[key] || 0) + 1;
+        };
+
+        (attempts || []).forEach((a) => recordDate(new Date(a.created_at)));
+        (decks || []).forEach((d) => recordDate(new Date(d.created_at)));
+        focusLogs.forEach((f) => recordDate(new Date(f.created_at)));
+        revLogs.forEach((r) => recordDate(new Date(r.created_at)));
+        (battlePlayers || []).forEach((p) => recordDate(new Date(p.joined_at)));
+
+        const heatmapWeeks = [];
+        const mapStartDate = new Date();
+        mapStartDate.setDate(today.getDate() - 12 * 7 - today.getDay()); // Sunday 12 weeks ago
+        mapStartDate.setHours(0, 0, 0, 0);
+
+        for (let w = 0; w < 12; w++) {
+          const weekDays = [];
+          for (let d = 0; d < 7; d++) {
+            const cur = new Date(mapStartDate);
+            cur.setDate(mapStartDate.getDate() + w * 7 + d);
+            const dateStr = cur.toISOString().split("T")[0];
+            weekDays.push({
+              date: dateStr,
+              count: dateCounts[dateStr] || 0,
+            });
+          }
+          heatmapWeeks.push(weekDays);
+        }
+
+        // 10. Compile recent activities timeline (merging local activity feed + Supabase logs)
+        const acts = [];
+        const localActivityFeedKey = `lockin_activity_feed_${currentUserId}`;
+        let localActivities = [];
+        try {
+          localActivities = JSON.parse(localStorage.getItem(localActivityFeedKey) || "[]");
+        } catch (e) {
+          console.error(e);
+        }
+
+        localActivities.forEach((la) => {
+          acts.push({
+            id: la.id,
+            type: la.type,
+            title: la.type.toUpperCase(),
+            desc: la.detail,
+            date: new Date(la.created_at)
+          });
+        });
+
+        // Backup parsing from DB tables if local feed was empty
+        if (acts.length === 0) {
+          (decks || []).forEach((d) => {
+            acts.push({
+              id: `deck-${d.id}`,
+              type: "flashcard",
+              title: "Created Flashcards",
+              desc: `Generated "${d.module_name}" with ${d.cards?.length || 0} cards`,
+              date: new Date(d.created_at),
+            });
+          });
+
+          (attempts || []).forEach((a) => {
+            acts.push({
+              id: `quiz-${a.id}`,
+              type: "quiz",
+              title: "Completed Quiz",
+              desc: `Tested in "${a.module_name}" (Score: ${a.score}/${a.total_questions})`,
+              date: new Date(a.created_at),
+            });
+          });
+
+          revLogs.forEach((r) => {
+            acts.push({
+              id: `rev-${r.id}`,
+              type: "revision",
+              title: "Generated Revision",
+              desc: `Created Quick Revision summary for "${r.module_name}"`,
+              date: new Date(r.created_at || Date.now()),
+            });
+          });
+
+          (battlePlayers || []).forEach((p) => {
+            const roomObj = rooms.find((rm) => rm.id === p.room_id);
+            const resultObj = winResults.find((res) => res.player_id === p.id);
+            const roomName = roomObj?.module_name || "Live Match";
+            const didWin = resultObj?.placement === 1;
+
+            acts.push({
+              id: `battle-${p.id}`,
+              type: didWin ? "battle_win" : "battle",
+              title: didWin ? "Won Live Battle" : "Joined Battle",
+              desc: didWin 
+                ? `Won 1v1 Battle Match in "${roomName}"` 
+                : `Challenged in 1v1 Battle Match: "${roomName}"`,
+              date: new Date(p.joined_at),
+            });
+          });
+        }
+
+        acts.sort((a, b) => b.date - a.date);
+        setActivities(acts.slice(0, 10));
 
         setStats({
           flashcardsCount: fcCreated,
@@ -157,65 +332,19 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
           battlesWon: matchesWon,
           quizAccuracy: quizCompleted > 0 ? avgAccuracy : null,
           totalSessions: totalSessions,
+          streak: streak,
+          hoursFocused: (focusMinutes / 60).toFixed(1),
+          flowSessionsCount: focusLogs.length,
+          docsUploaded: docsUploaded,
+          flashcardsReviewed: fcReviewed,
+          xp,
+          level,
+          levelProgress,
+          xpForCurrentLevel,
+          xpForNextLevel,
+          weeklyMinutes,
+          heatmapWeeks,
         });
-
-        // 5. Compile recent activities timeline
-        const acts = [];
-
-        // Flashcards created activities
-        (decks || []).forEach((d) => {
-          acts.push({
-            id: `deck-${d.id}`,
-            type: "flashcard",
-            title: "Created Flashcards",
-            desc: `Generated "${d.module_name}" with ${d.cards?.length || 0} cards`,
-            date: new Date(d.created_at),
-          });
-        });
-
-        // Quiz completed activities
-        (attempts || []).forEach((a) => {
-          acts.push({
-            id: `quiz-${a.id}`,
-            type: "quiz",
-            title: "Completed Quiz",
-            desc: `Tested in "${a.module_name}" (Score: ${a.score}/${a.total_questions})`,
-            date: new Date(a.created_at),
-          });
-        });
-
-        // Quick Revisions activities
-        revLogs.forEach((r) => {
-          acts.push({
-            id: `rev-${r.id}`,
-            type: "revision",
-            title: "Generated Revision",
-            desc: `Created Quick Revision summary for "${r.module_name}"`,
-            date: new Date(r.created_at || Date.now()),
-          });
-        });
-
-        // Matches activities
-        (battlePlayers || []).forEach((p) => {
-          const roomObj = rooms.find((rm) => rm.id === p.room_id);
-          const resultObj = winResults.find((res) => res.player_id === p.id);
-          const roomName = roomObj?.module_name || "Live Match";
-          const didWin = resultObj?.placement === 1;
-
-          acts.push({
-            id: `battle-${p.id}`,
-            type: didWin ? "battle_win" : "battle",
-            title: didWin ? "Won Live Battle" : "Joined Battle",
-            desc: didWin 
-              ? `Won 1v1 Battle Match in "${roomName}"` 
-              : `Challenged in 1v1 Battle Match: "${roomName}"`,
-            date: new Date(p.joined_at),
-          });
-        });
-
-        // Sort by date descending
-        acts.sort((a, b) => b.date - a.date);
-        setActivities(acts.slice(0, 10)); // keep last 10 activities
 
       } catch (err) {
         console.error("Failed to compile profile stats:", err);
@@ -238,8 +367,11 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
       bio: bBio.trim(),
       avatarChoice,
       avatarCustomUrl,
+      studyGoal: studyGoal.trim(),
+      favouriteSubject: favouriteSubject.trim(),
+      status: customStatus.trim()
     };
-    localStorage.setItem(`lockin_profile_${userEmail}`, JSON.stringify(updated));
+    onProfileUpdate?.(updated);
     setIsEditing(false);
   }
 
@@ -267,9 +399,10 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
     setTheme(nextTheme);
     document.documentElement.dataset.theme = nextTheme;
     localStorage.setItem("lockin-theme", nextTheme);
+    onProfileUpdate?.({ theme: nextTheme });
   };
 
-  // Sync username changes to supabase profiles table
+  // Sync username changes
   async function submitUsernameChange() {
     const trimmed = draftUsername.trim();
     if (!trimmed || trimmed === profile?.username) {
@@ -277,7 +410,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
       return;
     }
     setSavingUsername(true);
-    await onUsernameChange(trimmed);
+    await onProfileUpdate?.({ username: trimmed });
     setSavingUsername(false);
     setEditingUsername(false);
   }
@@ -295,7 +428,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
       {/* Header */}
       <header className="feature-page-header border-b border-gray-250 dark:border-white/10 pb-4 mb-6">
         <div style={{ flex: 1 }}>
-          <span className="setup-label">profile_dashboard</span>
+          <span className="setup-label">profile_dashboard_2.0</span>
           <h3 className="feature-page-title">Profile Dashboard</h3>
           <p className="feature-page-copy">Manage your AI study coach profile and review your stats.</p>
         </div>
@@ -306,7 +439,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
 
       {/* Profile Card block */}
       <section className="study-input-panel mb-8" style={{ maxWidth: "none" }}>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 p-6 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/50">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 p-6 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d]">
           
           {/* Avatar display Column */}
           <div className="flex flex-col items-center justify-center md:border-r border-gray-200 dark:border-white/10 pr-2">
@@ -328,25 +461,29 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
             {isEditing && (
               <span className="text-[10px] text-gray-500 mt-2 font-medium">Custom Upload enabled (Max 1MB)</span>
             )}
+            {!isEditing && customStatus && (
+              <div className="mt-3 px-3 py-1 bg-orange-500/10 text-orange-500 text-[10px] font-semibold font-mono rounded-full border border-orange-500/20 text-center max-w-[150px] truncate" title={customStatus}>
+                💬 {customStatus}
+              </div>
+            )}
           </div>
 
           {/* Details Column */}
-          <div className="md:col-span-3 flex flex-col justify-between">
+          <div className="md:col-span-3 flex flex-col justify-between gap-4">
             <div>
               {isEditing ? (
-                <div className="flex flex-col gap-2">
-                  <div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="sm:col-span-2">
                     <label className="profile-label">NAME</label>
                     <input
                       type="text"
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
                       className="profile-input"
-                      style={{ marginBottom: "0.75rem" }}
                       placeholder="Your name"
                     />
                   </div>
-                  <div>
+                  <div className="sm:col-span-2">
                     <label className="profile-label">BIO</label>
                     <textarea
                       value={bBio}
@@ -355,6 +492,36 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
                       rows={2}
                       style={{ resize: "none", fontFamily: "inherit" }}
                       placeholder="Short bio about yourself..."
+                    />
+                  </div>
+                  <div>
+                    <label className="profile-label">STUDY GOAL</label>
+                    <input
+                      type="text"
+                      value={studyGoal}
+                      onChange={(e) => setStudyGoal(e.target.value)}
+                      className="profile-input"
+                      placeholder="DSA preparation, Finals..."
+                    />
+                  </div>
+                  <div>
+                    <label className="profile-label">FAVOURITE SUBJECT</label>
+                    <input
+                      type="text"
+                      value={favouriteSubject}
+                      onChange={(e) => setFavouriteSubject(e.target.value)}
+                      className="profile-input"
+                      placeholder="Computer Science, Calculus..."
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="profile-label">CUSTOM STATUS</label>
+                    <input
+                      type="text"
+                      value={customStatus}
+                      onChange={(e) => setCustomStatus(e.target.value)}
+                      className="profile-input"
+                      placeholder="Grinding DSA before finals..."
                     />
                   </div>
                 </div>
@@ -368,15 +535,42 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
                       @{profile?.username || "no-username"}
                     </span>
                   </div>
-                  <p className="text-sm text-slate-600 dark:text-slate-300 italic min-h-[2.5rem] mt-1 pr-4">
+                  <p className="text-sm text-slate-600 dark:text-slate-300 italic min-h-[1.5rem] mt-1 pr-4">
                     {bBio || "This user holds a silent resolution to achieve focus.exe."}
                   </p>
+
+                  <div className="grid grid-cols-2 gap-4 mt-2 text-xs">
+                    <div>
+                      <span className="text-[10px] text-gray-500 uppercase tracking-wider font-mono">Study Goal</span>
+                      <p className="font-semibold text-slate-800 dark:text-white">{studyGoal || "None specified"}</p>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-gray-500 uppercase tracking-wider font-mono">Subject focus</span>
+                      <p className="font-semibold text-slate-800 dark:text-white">{favouriteSubject || "None specified"}</p>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
 
+            {/* RPG Level bar */}
+            {!dbLoading && (
+              <div className="mt-2 p-3 bg-gradient-to-r from-orange-500/5 to-transparent rounded-lg border border-orange-500/10">
+                <div className="flex justify-between items-center text-xs font-mono mb-1.5">
+                  <span className="font-bold text-orange-500">LEVEL {stats.level}</span>
+                  <span className="text-gray-500">{stats.xp} / {stats.xpForNextLevel} XP</span>
+                </div>
+                <div className="w-full bg-gray-250 dark:bg-white/10 h-2.5 rounded-full overflow-hidden">
+                  <div 
+                    className="bg-gradient-to-r from-orange-500 to-[#ffb454] h-full rounded-full transition-all duration-500" 
+                    style={{ width: `${stats.levelProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Sub Meta Info */}
-            <div className="flex flex-wrap items-center gap-6 mt-4 pt-4 border-t border-gray-200 dark:border-white/10 text-xs text-gray-500 dark:text-gray-400 font-mono">
+            <div className="flex flex-wrap items-center gap-6 mt-2 pt-3 border-t border-gray-200 dark:border-white/10 text-xs text-gray-500 dark:text-gray-400 font-mono">
               <span className="flex items-center gap-1.5">
                 <Calendar size={14} className="text-orange-500" />
                 Joined: {joinDate}
@@ -388,7 +582,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
             </div>
 
             {/* Profile Action button */}
-            <div className="mt-4 flex gap-2">
+            <div className="mt-2 flex gap-2">
               {isEditing ? (
                 <>
                   <button type="button" onClick={saveProfileData} className="generate-btn py-1.5 px-4 text-xs font-semibold" style={{ width: "auto", marginTop: 0 }}>
@@ -411,7 +605,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
       {/* Editing Avatar choice panel if overall editing is open */}
       {isEditing && (
         <section className="study-input-panel mb-8" style={{ maxWidth: "none" }}>
-          <div className="p-4 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/50">
+          <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d]">
             <span className="profile-label mb-3">CHOOSE AVATAR STYLE</span>
             <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
               {AVATAR_LABELS.map((label, idx) => (
@@ -422,7 +616,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
                   className={`flex flex-col items-center gap-2 p-3 rounded-lg border transition-colors ${
                     avatarChoice === idx.toString() 
                       ? "border-orange-500 bg-orange-500/5" 
-                      : "border-gray-200 dark:border-white/10 hover:border-orange-400"
+                      : "border-gray-250 dark:border-white/10 hover:border-orange-400"
                   }`}
                 >
                   <Avatar choice={idx.toString()} size={48} />
@@ -433,6 +627,119 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
           </div>
         </section>
       )}
+
+      {/* Heatmap & Weekly Graph grid split */}
+      <section className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+        {/* Heatmap Card */}
+        <div className="p-5 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col">
+          <span className="setup-label mb-3 flex items-center gap-1.5"><Activity size={12} className="text-orange-500"/> Activity Heatmap</span>
+          {dbLoading ? (
+            <div className="flex-1 flex items-center justify-center h-[120px] text-xs font-mono text-gray-500">Compiling activity map...</div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-thin">
+                {stats.heatmapWeeks.map((week, wIdx) => (
+                  <div key={wIdx} className="flex flex-col gap-1">
+                    {week.map((day, dIdx) => {
+                      let color = "bg-gray-200 dark:bg-neutral-800"; // 0
+                      if (day.count === 1) color = "bg-orange-200 dark:bg-orange-950";
+                      else if (day.count === 2) color = "bg-orange-300 dark:bg-orange-800";
+                      else if (day.count === 3) color = "bg-orange-400 dark:bg-orange-600";
+                      else if (day.count > 3) color = "bg-orange-500 dark:bg-orange-500";
+                      
+                      return (
+                        <div 
+                          key={dIdx} 
+                          className={`w-3 h-3 rounded-[2px] ${color} transition-colors duration-300 hover:ring-1 hover:ring-orange-500`}
+                          title={`${day.date}: ${day.count} activities`}
+                        />
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+              <div className="flex justify-between items-center text-[9px] font-mono text-gray-500">
+                <span>12 weeks ago</span>
+                <div className="flex items-center gap-1">
+                  <span>Less</span>
+                  <div className="w-2.5 h-2.5 rounded-[1px] bg-gray-200 dark:bg-neutral-800" />
+                  <div className="w-2.5 h-2.5 rounded-[1px] bg-orange-200 dark:bg-orange-950" />
+                  <div className="w-2.5 h-2.5 rounded-[1px] bg-orange-300 dark:bg-orange-800" />
+                  <div className="w-2.5 h-2.5 rounded-[1px] bg-orange-400 dark:bg-orange-600" />
+                  <div className="w-2.5 h-2.5 rounded-[1px] bg-orange-500 dark:bg-orange-500" />
+                  <span>More</span>
+                </div>
+                <span>Today</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Weekly Graph Card */}
+        <div className="p-5 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col">
+          <span className="setup-label mb-3 flex items-center gap-1.5"><Clock size={12} className="text-orange-500"/> Focus Hours (This Week)</span>
+          {dbLoading ? (
+            <div className="flex-1 flex items-center justify-center h-[120px] text-xs font-mono text-gray-500">Loading weekly telemetry...</div>
+          ) : (
+            <div className="flex-1 flex items-end justify-between gap-2 h-[120px] pt-4">
+              {["M", "T", "W", "T", "F", "S", "S"].map((day, idx) => {
+                const mins = stats.weeklyMinutes[idx] || 0;
+                const heightPercent = Math.min(100, Math.max(8, (mins / 120) * 100)); // cap at 2 hours for 100% height, min 8% for visibility
+                return (
+                  <div key={idx} className="flex-1 flex flex-col items-center gap-1.5 h-full justify-end group">
+                    <div className="relative w-full flex justify-center">
+                      {mins > 0 && (
+                        <span className="absolute -top-6 text-[9px] font-bold font-mono bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 px-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                          {mins}m
+                        </span>
+                      )}
+                      <div 
+                        className={`w-full max-w-[20px] rounded-t-[4px] transition-all duration-500 ${
+                          mins > 0 
+                            ? "bg-gradient-to-t from-orange-600 to-orange-400 hover:filter hover:brightness-110" 
+                            : "bg-gray-200 dark:bg-neutral-800"
+                        }`}
+                        style={{ height: `${heightPercent}%` }}
+                      />
+                    </div>
+                    <span className="text-[10px] font-bold text-gray-500 font-mono">{day}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Gamified Achievements section */}
+      <section className="p-5 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] mb-8">
+        <span className="setup-label mb-3 flex items-center gap-1.5"><Award size={14} className="text-orange-500"/> Achievement Badges</span>
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+          {[
+            { id: "streak", name: "Streak Master", desc: "Study 3 consecutive days", unlocked: stats.streak >= 3 },
+            { id: "focus", name: "Focus Guru", desc: "Focus for over 2.0 hours", unlocked: parseFloat(stats.hoursFocused) >= 2.0 },
+            { id: "quiz", name: "Quiz Champ", desc: "Complete 5 quiz attempts", unlocked: stats.quizzesCount >= 5 },
+            { id: "gladiator", name: "1v1 Gladiator", desc: "Participate in 3 battles", unlocked: stats.battlesCount >= 3 },
+            { id: "revision", name: "Revisionist", desc: "Build 3 revision summaries", unlocked: stats.revisionsCount >= 3 },
+            { id: "scholar", name: "Scholar", desc: "Upload 3 note files", unlocked: stats.docsUploaded >= 3 },
+          ].map((badge) => (
+            <div 
+              key={badge.id}
+              className={`p-3 rounded-lg border flex flex-col items-center text-center justify-between gap-1 transition-all ${
+                badge.unlocked 
+                  ? "border-orange-500/30 bg-orange-500/[0.03] text-orange-500" 
+                  : "border-gray-250 dark:border-white/5 bg-gray-50 dark:bg-neutral-900/10 text-gray-500 opacity-60"
+              }`}
+            >
+              <Trophy size={28} className={badge.unlocked ? "text-orange-500 animate-pulse" : "text-gray-400"} />
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[10px] font-bold font-mono tracking-tight leading-tight">{badge.name}</span>
+                <span className="text-[8px] leading-tight text-gray-500">{badge.desc}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
 
       {/* Stats and Recent Activity splits */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -448,7 +755,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
             
             {/* Stat 1 */}
-            <div className="p-4 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/30 flex flex-col justify-between min-h-[90px]">
+            <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between min-h-[90px] hover:border-orange-500/30 transition-all duration-300">
               <div className="flex justify-between items-center text-gray-500 dark:text-gray-400">
                 <BookOpen size={16} />
                 <span className="text-[10px] font-mono font-semibold uppercase">Flashcards</span>
@@ -462,7 +769,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
             </div>
 
             {/* Stat 2 */}
-            <div className="p-4 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/30 flex flex-col justify-between min-h-[90px]">
+            <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between min-h-[90px] hover:border-orange-500/30 transition-all duration-300">
               <div className="flex justify-between items-center text-gray-500 dark:text-gray-400">
                 <Brain size={16} />
                 <span className="text-[10px] font-mono font-semibold uppercase">Quizzes</span>
@@ -476,7 +783,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
             </div>
 
             {/* Stat 3 */}
-            <div className="p-4 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/30 flex flex-col justify-between min-h-[90px]">
+            <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between min-h-[90px] hover:border-orange-500/30 transition-all duration-300">
               <div className="flex justify-between items-center text-gray-500 dark:text-gray-400">
                 <Clock size={16} />
                 <span className="text-[10px] font-mono font-semibold uppercase">Revisions</span>
@@ -490,7 +797,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
             </div>
 
             {/* Stat 4 */}
-            <div className="p-4 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/30 flex flex-col justify-between min-h-[90px]">
+            <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between min-h-[90px] hover:border-orange-500/30 transition-all duration-300">
               <div className="flex justify-between items-center text-gray-500 dark:text-gray-400">
                 <Swords size={16} />
                 <span className="text-[10px] font-mono font-semibold uppercase">Battles</span>
@@ -504,7 +811,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
             </div>
 
             {/* Stat 5 */}
-            <div className="p-4 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/30 flex flex-col justify-between min-h-[90px]">
+            <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between min-h-[90px] hover:border-orange-500/30 transition-all duration-300">
               <div className="flex justify-between items-center text-gray-500 dark:text-gray-400">
                 <Trophy size={16} className="text-orange-500" />
                 <span className="text-[10px] font-mono font-semibold uppercase">Wins</span>
@@ -518,7 +825,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
             </div>
 
             {/* Stat 6 */}
-            <div className="p-4 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/30 flex flex-col justify-between min-h-[90px]">
+            <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between min-h-[90px] hover:border-orange-500/30 transition-all duration-300">
               <div className="flex justify-between items-center text-gray-500 dark:text-gray-400">
                 <Award size={16} />
                 <span className="text-[10px] font-mono font-semibold uppercase">Accuracy</span>
@@ -531,9 +838,49 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
               </div>
             </div>
 
+            {/* Extra Stats: Focus Hours, streak, upload */}
+            <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between min-h-[90px] hover:border-orange-500/30 transition-all duration-300">
+              <div className="flex justify-between items-center text-gray-500 dark:text-gray-400">
+                <Clock size={16} className="text-orange-500" />
+                <span className="text-[10px] font-mono font-semibold uppercase">Hours Focused</span>
+              </div>
+              <div className="mt-2">
+                <p className="text-2xl font-bold font-mono text-slate-900 dark:text-white">
+                  {dbLoading ? "—" : stats.hoursFocused}h
+                </p>
+                <p className="text-[10px] text-gray-500 mt-1">Flow session totals</p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between min-h-[90px] hover:border-orange-500/30 transition-all duration-300">
+              <div className="flex justify-between items-center text-gray-500 dark:text-gray-400">
+                <Activity size={16} className="text-orange-500 animate-bounce" />
+                <span className="text-[10px] font-mono font-semibold uppercase">Study Streak</span>
+              </div>
+              <div className="mt-2">
+                <p className="text-2xl font-bold font-mono text-[#ffb454]">
+                  🔥 {dbLoading ? "—" : stats.streak} days
+                </p>
+                <p className="text-[10px] text-gray-500 mt-1">Consecutive focus</p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between min-h-[90px] hover:border-orange-500/30 transition-all duration-300">
+              <div className="flex justify-between items-center text-gray-500 dark:text-gray-400">
+                <FileText size={16} />
+                <span className="text-[10px] font-mono font-semibold uppercase">Uploaded Notes</span>
+              </div>
+              <div className="mt-2">
+                <p className="text-2xl font-bold font-mono text-slate-900 dark:text-white">
+                  {dbLoading ? "—" : stats.docsUploaded}
+                </p>
+                <p className="text-[10px] text-gray-500 mt-1">Note files compiled</p>
+              </div>
+            </div>
+
           </div>
 
-          {/* Stat 7 session tally */}
+          {/* Session tally */}
           <div className="p-5 rounded-xl border border-orange-500/20 bg-orange-500/[0.02] flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="p-3 bg-orange-500/10 text-orange-500 rounded-lg">
@@ -541,7 +888,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
               </div>
               <div>
                 <h5 className="font-bold text-slate-900 dark:text-white text-sm">Total Study Sessions</h5>
-                <p className="text-xs text-gray-500">Accumulated quizzes, decks, battles & revisions</p>
+                <p className="text-xs text-gray-500">Accumulated quizzes, decks, battles & focus sessions</p>
               </div>
             </div>
             <span className="text-3xl font-bold font-mono text-orange-500">
@@ -559,7 +906,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
           </div>
 
           <div 
-            className="flex flex-col gap-4 p-5 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/30 overflow-y-auto"
+            className="flex flex-col gap-4 p-5 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] overflow-y-auto"
             style={{ maxHeight: "392px" }}
           >
             {dbLoading ? (
@@ -579,7 +926,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
                       {/* Timeline dot */}
                       <span className={`absolute -left-[21px] top-1.5 w-2 h-2 rounded-full ${actIconColor}`} />
                       <div className="flex justify-between items-center text-gray-400 font-mono text-[10px] mb-0.5">
-                        <span className="font-semibold text-slate-800 dark:text-white uppercase">{a.title}</span>
+                        <span className="font-semibold text-slate-800 dark:text-white uppercase truncate max-w-[120px]" title={a.title}>{a.title}</span>
                         <span>
                           {a.date.toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                         </span>
@@ -605,7 +952,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           
           {/* Change username */}
-          <div className="p-5 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/30">
+          <div className="p-5 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d]">
             <span className="profile-label">CHANGE USERNAME</span>
             {editingUsername ? (
               <div className="flex items-center gap-2 mt-2">
@@ -615,7 +962,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
                   onChange={(e) => setDraftUsername(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && submitUsernameChange()}
                   disabled={savingUsername}
-                  className="flex-1 rounded-lg border border-gray-300 dark:border-white/10 bg-white dark:bg-neutral-800 text-slate-900 dark:text-white px-3 py-2 text-sm outline-none focus:border-orange-500"
+                  className="flex-1 rounded-lg border border-gray-300 dark:border-white/10 bg-white dark:bg-[#12161d] text-slate-900 dark:text-white px-3 py-2 text-sm outline-none focus:border-orange-500"
                 />
                 <button
                   type="button"
@@ -650,7 +997,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
           </div>
 
           {/* Theme Settings & Logout */}
-          <div className="p-5 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900/30 flex flex-col justify-between gap-4">
+          <div className="p-5 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col justify-between gap-4">
             <div className="flex justify-between items-center">
               <div>
                 <span className="profile-label">THEME CONTROL</span>
@@ -666,7 +1013,7 @@ export default function ProfileDashboard({ session, profile, onUsernameChange, o
               </button>
             </div>
 
-            <div className="pt-4 border-t border-gray-200 dark:border-white/10 flex justify-between items-center">
+            <div className="pt-4 border-t border-gray-250 dark:border-white/10 flex justify-between items-center">
               <span className="text-xs text-red-500 font-mono">WARNING: session terminate</span>
               <button
                 type="button"

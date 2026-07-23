@@ -140,6 +140,7 @@ ${text}`;
           model: "llama-3.3-70b-versatile",
           messages: [{ role: "user", content: prompt }],
           temperature: 0.3,
+          response_format: { type: "json_object" }
         }),
       }
     );
@@ -157,17 +158,43 @@ ${text}`;
       return res.status(500).json({ error: "No response received from the AI." });
     }
 
-    const firstBrace = raw.indexOf("{");
-    const lastBrace = raw.lastIndexOf("}");
-    if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
-      throw new Error("Invalid JSON response from AI");
+    let parsed = null;
+    try {
+      const firstBrace = raw.indexOf("{");
+      const lastBrace = raw.lastIndexOf("}");
+      if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
+        throw new Error("No JSON object structure found in the AI response.");
+      }
+      let cleaned = raw.substring(firstBrace, lastBrace + 1).trim();
+
+      // Clean trailing commas in objects/arrays (e.g. {"a": 1,} -> {"a": 1} or [1,2,3,] -> [1,2,3])
+      cleaned = cleaned.replace(/,(\s*[\]}])/g, "$1");
+
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (initialErr) {
+        console.warn("Initial JSON parse failed. Attempting control character cleanup...", initialErr.message);
+        // Replace unescaped control chars (like real newlines inside JSON string values)
+        let repaired = cleaned.replace(/[\u0000-\u001f]/g, (ch) => {
+          if (ch === "\n") return "\\n";
+          if (ch === "\r") return "\\r";
+          if (ch === "\t") return "\\t";
+          return "";
+        });
+        parsed = JSON.parse(repaired);
+      }
+    } catch (parseErr) {
+      console.error("JSON Parsing/Repair failed for Groq response.");
+      console.error("Raw response content was:", raw);
+      return res.status(500).json({
+        error: "Failed to parse the generated study material. Please try again.",
+        details: parseErr.message
+      });
     }
-    const cleaned = raw.substring(firstBrace, lastBrace + 1).trim();
-    const parsed = JSON.parse(cleaned);
 
     return res.status(200).json(parsed);
   } catch (err) {
-    console.error(err);
+    console.error("Fetch/API invocation error:", err);
     return res.status(500).json({ error: err.message || "Could not generate study material." });
   }
   } catch (globalErr) {

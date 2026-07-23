@@ -1,12 +1,5 @@
 import { useRef, useState } from "react";
 import { FileText, Paperclip, X } from "lucide-react";
-import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
-import JSZip from "jszip";
-
-GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url
-).toString();
 
 function fileExtension(fileName) {
   const parts = fileName.toLowerCase().split(".");
@@ -28,6 +21,13 @@ function extractTextFromXml(xmlText) {
 }
 
 async function extractPdfText(file) {
+  // Dynamically load pdfjs-dist
+  const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
+  GlobalWorkerOptions.workerSrc = new URL(
+    "pdfjs-dist/build/pdf.worker.min.mjs",
+    import.meta.url
+  ).toString();
+
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await getDocument({ data: arrayBuffer }).promise;
 
@@ -45,6 +45,8 @@ async function extractPdfText(file) {
 }
 
 async function extractPptxText(file) {
+  // Dynamically load jszip
+  const { default: JSZip } = await import("jszip");
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
   const slidePaths = Object.keys(zip.files)
     .filter((path) => /^ppt\/slides\/slide\d+\.xml$/.test(path))
