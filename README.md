@@ -1,4 +1,4 @@
-# StudyBuddy
+# LockIN
 
 A study tool that turns your notes into flashcards using AI. This is v1:
 paste/upload notes, generate flashcards, flip through them. More features
