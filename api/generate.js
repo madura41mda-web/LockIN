@@ -2,6 +2,8 @@ export const config = {
   maxDuration: 60,
 };
 
+const MAX_GENERATE_TEXT_CHARS = 14000;
+
 function detectQuestionBank(text) {
   const signals = [
     /\bCO\d\b/i,
@@ -13,16 +15,62 @@ function detectQuestionBank(text) {
   return hits >= 2;
 }
 
+function validatePayload(mode, payload) {
+  if (mode === "flashcards" && (!Array.isArray(payload?.flashcards) || payload.flashcards.length === 0)) {
+    return "The AI did not return any usable flashcards.";
+  }
+  if (mode === "quiz" && (!Array.isArray(payload?.quiz) || payload.quiz.length === 0)) {
+    return "The AI did not return any usable quiz questions.";
+  }
+  if (mode === "revision" && (!Array.isArray(payload?.revision) || payload.revision.length === 0)) {
+    return "The AI did not return any usable revision notes.";
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    const { text, mode, options } = req.body || {};
+    const { text, mode, options, documentContext } = req.body || {};
+    const requestCharCount = JSON.stringify(req.body || {}).length;
+    const textCharCount = typeof text === "string" ? text.length : 0;
+    const chunkCount = options?.batchMeta?.chunkCount || 0;
+    const batchIndex = options?.batchMeta?.index || 1;
+    const batchCount = options?.batchMeta?.count || 1;
+
+    console.info("Generate request received:", {
+      mode,
+      requestCharCount,
+      textCharCount,
+      chunkCount,
+      batchIndex,
+      batchCount,
+    });
 
     if (!text || !text.trim()) {
       return res.status(400).json({ error: "No notes were sent." });
+    }
+
+    if (documentContext) {
+      console.warn("Rejected generate request with documentContext. Send one bounded text batch instead.", {
+        mode,
+        requestCharCount,
+      });
+      return res.status(400).json({ error: "Generation accepts only one bounded text batch at a time." });
+    }
+
+    if (text.length > MAX_GENERATE_TEXT_CHARS) {
+      console.warn("Rejected oversized generate batch:", {
+        mode,
+        textCharCount: text.length,
+        maxTextChars: MAX_GENERATE_TEXT_CHARS,
+      });
+      return res.status(413).json({
+        error: "This section is too large to generate safely. Split it into smaller batches and try again.",
+      });
     }
 
     const apiKey = process.env.GROQ_API_KEY;
@@ -32,9 +80,11 @@ export default async function handler(req, res) {
 
   const isQuestionBank = detectQuestionBank(text);
 
-  const commonRules = `The notes contain source markers like [PAGE 3] or [SLIDE 3]. For each item, find the nearest preceding marker and report it in the "page" field. For page markers, use only the number. For slide markers, use "Slide N". Never include the marker text itself in your output.
+  const commonRules = `The notes contain source markers like [PAGE 3], [SLIDE 3], or [filename PAGE 3]. For each item, find the nearest preceding marker and report it in the "page" field. For page markers, use only the number. For slide markers, use "Slide N". Never include the marker text itself in your output.
 
 Only use content relevant to studying: definitions, derivations, formulae, numericals, key concepts, and likely exam questions.
+
+Create study material from concepts, definitions, relationships, worked examples, important topics, and recurring academic ideas. Do not create questions from page numbers, file names, isolated fragments, repeated headers, or one-off sentences without educational value.
 
 Completely ignore and never create content about:
 - Cover pages or college/university information
@@ -59,9 +109,11 @@ ${isQuestionBank ? "\nThis document appears to be a question bank. Prioritize ge
     : "";
 
   const instructions = {
-    flashcards: `Read the study notes below and create 8-12 flashcards for exam preparation.
+    flashcards: `Read the study notes below and create ${options?.cardsPerBatch || 10} flashcards for exam preparation.
 
 ${commonRules}${focusLine}${avoidFlashcardsLine}${extraBatchLine}
+
+Cover concepts from this batch only. Prefer definitions, comparisons, formulas, working principles, applications, and worked examples over isolated facts.
 
 Respond ONLY with valid JSON in exactly this format:
 
@@ -145,10 +197,31 @@ ${text}`;
       }
     );
 
+    console.info("Groq provider response:", {
+      status: response.status,
+      ok: response.ok,
+      mode,
+      textCharCount,
+      requestCharCount,
+      batchIndex,
+      batchCount,
+    });
+
     if (!response.ok) {
       const errorText = await response.text();
-      console.error("Groq API Error:", errorText);
-      return res.status(500).json({ error: "The AI service returned an error." });
+      console.error("Groq API Error:", {
+        status: response.status,
+        statusText: response.statusText,
+        mode,
+        textCharCount,
+        requestCharCount,
+        batchIndex,
+        batchCount,
+        body: errorText,
+      });
+      return res.status(500).json({
+        error: `The AI service returned an error (${response.status}). Try a smaller or clearer document.`,
+      });
     }
 
     const data = await response.json();
@@ -190,6 +263,15 @@ ${text}`;
         error: "Failed to parse the generated study material. Please try again.",
         details: parseErr.message
       });
+    }
+
+    const validationError = validatePayload(mode, parsed);
+    if (validationError) {
+      console.error("Generated payload validation failed:", {
+        mode,
+        keys: parsed && typeof parsed === "object" ? Object.keys(parsed) : [],
+      });
+      return res.status(422).json({ error: validationError });
     }
 
     return res.status(200).json(parsed);

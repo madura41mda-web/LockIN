@@ -45,8 +45,18 @@ export default function ProfileMenu({
         setEditing(false);
       }
     }
+    function handleEscape(e) {
+      if (e.key === "Escape") {
+        setOpen(false);
+        setEditing(false);
+      }
+    }
     document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
   }, []);
 
   const profileName = profile?.displayName || profile?.display_name || localProfile.displayName || username || userEmail?.split("@")[0] || "Account";
@@ -73,7 +83,7 @@ export default function ProfileMenu({
   }
 
   return (
-    <div className="relative" ref={menuRef}>
+    <div className="profile-menu" ref={menuRef}>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -99,7 +109,7 @@ export default function ProfileMenu({
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-72 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900 shadow-2xl p-4 z-50">
+        <div className="profile-dropdown absolute right-0 mt-2 w-72 rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-neutral-900 shadow-2xl p-4">
           
           <div className="flex items-center gap-3 mb-3 pb-3 border-b border-gray-200 dark:border-white/10">
             <Avatar

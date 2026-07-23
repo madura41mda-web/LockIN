@@ -15,6 +15,7 @@ import BattleMode from "./components/battle/BattleMode";
 import FlowState, { TIMER_MODES } from "./components/FlowState";
 import StudyLobby from "./components/StudyLobby";
 import { parseModules } from "./utils/parseModules";
+import { createGenerationBatches, mergeFlashcardBatches } from "./utils/documentProcessing";
 import { useFlowAmbience, loadAmbiencePrefs } from "./utils/useFlowAmbience";
 import { supabase } from "./supabaseClient";
 
@@ -71,6 +72,22 @@ const FEATURES = [
 
 const FEATURE_IDS = new Set(FEATURES.map((feature) => feature.id));
 
+function validArray(value) {
+  return Array.isArray(value) && value.length > 0;
+}
+
+function validateGeneratedData(mode, data) {
+  if (mode === "flashcards" && !validArray(data?.flashcards)) {
+    throw new Error("No usable flashcards were generated. Try a clearer document or a smaller section.");
+  }
+  if (mode === "quiz" && !validArray(data?.quiz)) {
+    throw new Error("No usable quiz questions were generated. Try a clearer document or a smaller section.");
+  }
+  if (mode === "revision" && !validArray(data?.revision)) {
+    throw new Error("No usable revision notes were generated. Try a clearer document or a smaller section.");
+  }
+}
+
 function getModeFromHash() {
   if (typeof window === "undefined") return "flashcards";
   const hashMode = window.location.hash.replace(/^#\/?/, "");
@@ -101,8 +118,10 @@ export default function App() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [generationStatus, setGenerationStatus] = useState("");
 
   const [currentDocumentId, setCurrentDocumentId] = useState(null);
+  const [processedDocuments, setProcessedDocuments] = useState([]);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [pendingBattleCode, setPendingBattleCode] = useState(null);
@@ -453,6 +472,7 @@ export default function App() {
     setQuizQuestions(null);
     setQuizSummaryData(null);
     setError(null);
+    setGenerationStatus("");
     setSaveStatus("");
   }
 
@@ -478,10 +498,21 @@ export default function App() {
   }
 
   async function callGenerate(mode, options) {
+    const selectedText = getSelectedText();
+    const requestBody = { text: selectedText, mode, options };
+    const requestChars = JSON.stringify(requestBody).length;
+    console.info("LockIN generate request", {
+      mode,
+      requestChars,
+      textChars: selectedText.length,
+      chunkCount: options?.batchMeta?.chunkCount || 0,
+      batch: options?.batchMeta ? `${options.batchMeta.index}/${options.batchMeta.count}` : "single",
+    });
+
     const response = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: getSelectedText(), mode, options }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
@@ -496,21 +527,115 @@ export default function App() {
     }
 
     try {
-      return await response.json();
+      const data = await response.json();
+      validateGeneratedData(mode, data);
+      return data;
     } catch (e) {
+      if (e instanceof Error && e.message.startsWith("No usable")) throw e;
       throw new Error("Failed to parse server response.");
     }
-  }  async function handleGenerateSimple() {
+  }
+
+  async function generateFlashcardsInBatches(options = {}) {
+    const batches = createGenerationBatches({
+      text: getSelectedText(),
+      documents: processedDocuments,
+      selectedModule,
+    });
+
+    if (batches.length === 0) {
+      throw new Error("No usable study content was found for flashcard generation.");
+    }
+
+    console.info("LockIN flashcard batching", {
+      batchCount: batches.length,
+      batchSizes: batches.map((batch) => batch.text.length),
+      chunkCounts: batches.map((batch) => batch.chunkCount),
+    });
+
+    const allCards = [];
+    for (const batch of batches) {
+      setGenerationStatus(`Generating batch ${batch.index} of ${batch.count}`);
+      try {
+        const data = await callGenerateBatch("flashcards", batch.text, {
+          ...options,
+          cardsPerBatch: batches.length > 1 ? 5 : 12,
+          batchMeta: {
+            index: batch.index,
+            count: batch.count,
+            chunkCount: batch.chunkCount,
+            charCount: batch.text.length,
+            sources: batch.sources,
+          },
+          batchMode: true,
+          totalBatches: batch.count,
+        });
+        allCards.push(data.flashcards || []);
+      } catch (err) {
+        throw new Error(`Batch ${batch.index} of ${batch.count} failed: ${err.message}`);
+      }
+    }
+
+    setGenerationStatus("Combining flashcards");
+    const mergedCards = mergeFlashcardBatches(allCards);
+    if (!validArray(mergedCards)) {
+      throw new Error("No usable flashcards were generated after combining batches.");
+    }
+    return { flashcards: mergedCards };
+  }
+
+  async function callGenerateBatch(mode, text, options) {
+    const requestBody = { text, mode, options };
+    const requestChars = JSON.stringify(requestBody).length;
+    console.info("LockIN generate request", {
+      mode,
+      requestChars,
+      textChars: text.length,
+      chunkCount: options?.batchMeta?.chunkCount || 0,
+      batch: options?.batchMeta ? `${options.batchMeta.index}/${options.batchMeta.count}` : "single",
+    });
+
+    const response = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      let errMsg = "Something went wrong.";
+      try {
+        const data = await response.json();
+        errMsg = data.error || errMsg;
+      } catch (e) {
+        errMsg = `Server error (${response.status}): ${response.statusText || "Internal Server Error"}`;
+      }
+      throw new Error(errMsg);
+    }
+
+    try {
+      const data = await response.json();
+      validateGeneratedData(mode, data);
+      return data;
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("No usable")) throw e;
+      throw new Error("Failed to parse server response.");
+    }
+  }
+
+  async function handleGenerateSimple() {
     if (!noteText.trim()) {
       setError("Please upload a PDF or paste some notes first.");
       return;
     }
     setLoading(true);
     setError(null);
+    setGenerationStatus("");
     setFlashcards(null);
     setRevision(null);
     try {
-      const data = await callGenerate(activeMode);
+      const data = activeMode === "flashcards"
+        ? await generateFlashcardsInBatches()
+        : await callGenerate(activeMode);
       if (activeMode === "flashcards") {
         setFlashcards(data.flashcards);
         setFlashcardEndMessage("");
@@ -523,6 +648,7 @@ export default function App() {
             module_name: displayModuleName,
             subject: displayModuleName,
             cards: data.flashcards,
+            document_id: currentDocumentId,
           });
           if (error) {
             console.error("Auto-save flashcards failed in Supabase:", error);
@@ -574,6 +700,7 @@ export default function App() {
       console.error(err);
       setError(err.message || "Could not reach the server.");
     } finally {
+      setGenerationStatus("");
       setLoading(false);
     }
   }
@@ -612,6 +739,7 @@ export default function App() {
         score: summary.score,
         total_questions: summary.total,
         questions: quizQuestions,
+        document_id: currentDocumentId,
       }).then(({ error }) => {
         if (error) {
           console.error("Auto-save quiz attempt failed in Supabase:", error);
@@ -657,7 +785,7 @@ export default function App() {
     setError(null);
     setFlashcardEndMessage("");
     try {
-      const data = await callGenerate("flashcards", { focusTopic: topic });
+      const data = await generateFlashcardsInBatches({ focusTopic: topic });
       setFlashcards(data.flashcards);
     } catch (err) {
       console.error(err);
@@ -683,7 +811,7 @@ export default function App() {
     setFlashcardEndMessage("");
 
     try {
-      const data = await callGenerate("flashcards", {
+      const data = await generateFlashcardsInBatches({
         avoidQuestions: currentCards.map((card) => card.question).filter(Boolean),
         extraBatch: true,
       });
@@ -711,15 +839,17 @@ export default function App() {
   // FileUpload still reports the file name after a successful read, but we no
   // longer persist a "documents" row for it — My Library groups by an editable
   // subject name instead of source file, which doesn't need this.
-  function handleFileRead(fileName) {
-    setCurrentDocumentId(null);
-    if (fileName) {
-      logStudyActivity("upload", `Uploaded note file: ${fileName}`);
+  function handleFileRead(fileResult) {
+    const documents = fileResult?.documents || [];
+    setProcessedDocuments(documents);
+    setCurrentDocumentId(documents[0]?.id || null);
+    if (fileResult?.fileName) {
+      logStudyActivity("upload", `Uploaded note file: ${fileResult.fileName}`);
       try {
         const userId = session?.user?.id || "anon";
         const docCountKey = `lockin_docs_uploaded_${userId}`;
         const currentDocCount = parseInt(localStorage.getItem(docCountKey) || '0', 10);
-        localStorage.setItem(docCountKey, (currentDocCount + 1).toString());
+        localStorage.setItem(docCountKey, (currentDocCount + Math.max(1, documents.length)).toString());
       } catch (e) {
         console.error("Failed to update uploaded document count:", e);
       }
@@ -737,6 +867,7 @@ export default function App() {
         score: quizSummaryData.score,
         total_questions: quizSummaryData.total,
         questions: quizQuestions,
+        document_id: currentDocumentId,
       });
       if (error) {
         console.error("Supabase Error [Save Quiz Attempt]:", {
@@ -760,6 +891,7 @@ export default function App() {
         module_name: displayModuleName,
         subject: displayModuleName,
         cards: flashcards,
+        document_id: currentDocumentId,
       });
       if (error) {
         console.error("Supabase Error [Save Flashcard Deck]:", {
@@ -1005,7 +1137,13 @@ export default function App() {
           ) : (
             <>
               <section className="study-input-panel" aria-label="Study source">
-                <FileUpload noteText={noteText} setNoteText={handleNoteTextChange} onFileRead={handleFileRead} />
+                <FileUpload
+                  noteText={noteText}
+                  setNoteText={handleNoteTextChange}
+                  onFileRead={handleFileRead}
+                  session={session}
+                  subject={displayModuleName}
+                />
                 <ModuleSelector modules={modules} selectedModule={selectedModule} setSelectedModule={setSelectedModule} />
               </section>
 
@@ -1019,6 +1157,7 @@ export default function App() {
                 </button>
               ) : null}
 
+              {generationStatus && <p className="mt-3 text-center mono text-sm text-orange-400">{generationStatus}</p>}
               {error && <p className="mt-4 text-red-400 text-center mono">{error}</p>}
 
               {activeMode === "flashcards" && flashcards && (

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { 
   X, Tag, BookOpen, Brain, Pencil, Check, Search, SlidersHorizontal, 
-  ArrowUpDown, Code2, Terminal, Library, Activity, BookMarked, Sparkles
+  ArrowUpDown, Code2, Terminal, Library, Activity, BookMarked, Sparkles,
+  MoreVertical, Trash2
 } from "lucide-react";
 import { supabase } from "../supabaseClient";
 import Flashcards from "./Flashcards";
@@ -15,6 +16,14 @@ export default function MyLibrary({ session, onClose, onOpenDeck }) {
   const [editingSubject, setEditingSubject] = useState(null);
   const [draftSubject, setDraftSubject] = useState("");
   const [renaming, setRenaming] = useState(false);
+  const [openMenu, setOpenMenu] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [groupDeleteTarget, setGroupDeleteTarget] = useState(null);
+  const [groupDeleteMode, setGroupDeleteMode] = useState("move");
+  const [deletingGroup, setDeletingGroup] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [libraryStatus, setLibraryStatus] = useState("");
+  const [libraryError, setLibraryError] = useState("");
 
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState("");
@@ -26,11 +35,21 @@ export default function MyLibrary({ session, onClose, onOpenDeck }) {
   }, [session]);
 
   async function load() {
+    const userId = session?.user?.id;
+    if (!userId) return;
     setLoading(true);
+    setLibraryError("");
     const [decksRes, attemptsRes] = await Promise.all([
-      supabase.from("flashcard_decks").select("*").order("created_at", { ascending: false }),
-      supabase.from("quiz_attempts").select("*").order("created_at", { ascending: false }),
+      supabase.from("flashcard_decks").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
+      supabase.from("quiz_attempts").select("*").eq("user_id", userId).order("created_at", { ascending: false }),
     ]);
+    if (decksRes.error || attemptsRes.error) {
+      console.error("Loading library resources failed:", {
+        decksError: decksRes.error,
+        attemptsError: attemptsRes.error,
+      });
+      setLibraryError(decksRes.error?.message || attemptsRes.error?.message || "Could not load Library resources.");
+    }
     setDecks(decksRes.data || []);
     setAttempts(attemptsRes.data || []);
     setLoading(false);
@@ -52,29 +71,215 @@ export default function MyLibrary({ session, onClose, onOpenDeck }) {
   );
   const groups = subjectNames.map((subject) => ({ subject, ...itemsForSubject(subject) }));
 
+  function beginRename(subject) {
+    setOpenMenu(null);
+    setLibraryError("");
+    setLibraryStatus("");
+    setEditingSubject(subject);
+    setDraftSubject(subject);
+  }
+
+  function cancelRename() {
+    setDraftSubject(editingSubject || "");
+    setEditingSubject(null);
+    setLibraryError("");
+  }
+
   async function saveSubjectRename(oldSubject) {
+    const userId = session?.user?.id;
     const trimmed = draftSubject.trim();
-    if (!trimmed || trimmed === oldSubject) {
+    if (!userId) {
+      setLibraryError("You must be signed in to rename Library groups.");
+      return;
+    }
+    if (!trimmed) {
+      setLibraryError("Library group name cannot be empty.");
+      return;
+    }
+    if (trimmed === oldSubject) {
       setEditingSubject(null);
       return;
     }
 
     setRenaming(true);
+    setLibraryError("");
+    setLibraryStatus("");
     const deckIds = decks.filter((d) => subjectOf(d) === oldSubject).map((d) => d.id);
     const attemptIds = attempts.filter((a) => subjectOf(a) === oldSubject).map((a) => a.id);
 
-    await Promise.all([
+    const [deckResult, attemptResult] = await Promise.all([
       deckIds.length
-        ? supabase.from("flashcard_decks").update({ subject: trimmed }).in("id", deckIds)
-        : Promise.resolve(),
+        ? supabase.from("flashcard_decks").update({ subject: trimmed }).eq("user_id", userId).in("id", deckIds)
+        : Promise.resolve({ error: null }),
       attemptIds.length
-        ? supabase.from("quiz_attempts").update({ subject: trimmed }).in("id", attemptIds)
-        : Promise.resolve(),
+        ? supabase.from("quiz_attempts").update({ subject: trimmed }).eq("user_id", userId).in("id", attemptIds)
+        : Promise.resolve({ error: null }),
     ]);
 
-    await load();
     setRenaming(false);
+    if (deckResult.error || attemptResult.error) {
+      console.error("Library group rename failed:", {
+        oldSubject,
+        trimmed,
+        deckError: deckResult.error,
+        attemptError: attemptResult.error,
+      });
+      setLibraryError(deckResult.error?.message || attemptResult.error?.message || "Could not rename this Library group.");
+      return;
+    }
+
+    const deckIdSet = new Set(deckIds);
+    const attemptIdSet = new Set(attemptIds);
+    setDecks((current) => current.map((deck) => (
+      deckIdSet.has(deck.id) ? { ...deck, subject: trimmed } : deck
+    )));
+    setAttempts((current) => current.map((attempt) => (
+      attemptIdSet.has(attempt.id) ? { ...attempt, subject: trimmed } : attempt
+    )));
+    setLibraryStatus(`Renamed "${oldSubject}" to "${trimmed}".`);
     setEditingSubject(null);
+  }
+
+  function resourceTitle(resource) {
+    return resource?.module_name || resource?.subject || "Untitled resource";
+  }
+
+  function requestDeleteResource(type, resource) {
+    setOpenMenu(null);
+    setLibraryError("");
+    setLibraryStatus("");
+    setDeleteTarget({ type, resource });
+  }
+
+  async function confirmDeleteResource() {
+    if (!deleteTarget || deleting) return;
+    const userId = session?.user?.id;
+    if (!userId) {
+      setLibraryError("You must be signed in to delete Library resources.");
+      return;
+    }
+
+    setDeleting(true);
+    setLibraryError("");
+    setLibraryStatus("");
+
+    const tableName = deleteTarget.type === "flashcards" ? "flashcard_decks" : "quiz_attempts";
+    const resourceName = resourceTitle(deleteTarget.resource);
+    const { error, count } = await supabase
+      .from(tableName)
+      .delete({ count: "exact" })
+      .eq("id", deleteTarget.resource.id)
+      .eq("user_id", userId);
+
+    if (error) {
+      console.error("Delete Library resource failed:", {
+        tableName,
+        resourceId: deleteTarget.resource.id,
+        userId,
+        error,
+      });
+      setLibraryError(`Could not delete "${resourceName}": ${error.message || "Supabase rejected the request."}`);
+      setDeleting(false);
+      return;
+    }
+
+    if (count === 0) {
+      console.warn("Delete Library resource affected no rows:", {
+        tableName,
+        resourceId: deleteTarget.resource.id,
+        userId,
+      });
+      setLibraryError(`Could not delete "${resourceName}". It may already be deleted or you may not own it.`);
+      setDeleting(false);
+      return;
+    }
+
+    if (deleteTarget.type === "flashcards") {
+      setDecks((current) => current.filter((deck) => deck.id !== deleteTarget.resource.id));
+    } else {
+      setAttempts((current) => current.filter((attempt) => attempt.id !== deleteTarget.resource.id));
+    }
+
+    setLibraryStatus(`Deleted "${resourceName}".`);
+    setDeleting(false);
+    setDeleteTarget(null);
+  }
+
+  function requestDeleteGroup(group) {
+    setOpenMenu(null);
+    setLibraryError("");
+    setLibraryStatus("");
+    setGroupDeleteMode("move");
+    setGroupDeleteTarget({
+      subject: group.subject,
+      decks: group.decks,
+      attempts: group.attempts,
+    });
+  }
+
+  async function confirmDeleteGroup() {
+    if (!groupDeleteTarget || deletingGroup) return;
+    const userId = session?.user?.id;
+    if (!userId) {
+      setLibraryError("You must be signed in to delete Library groups.");
+      return;
+    }
+
+    const deckIds = groupDeleteTarget.decks.map((deck) => deck.id);
+    const attemptIds = groupDeleteTarget.attempts.map((attempt) => attempt.id);
+    const fallbackSubject = "Uncategorized";
+
+    setDeletingGroup(true);
+    setLibraryError("");
+    setLibraryStatus("");
+
+    const deckQuery = groupDeleteMode === "delete"
+      ? (deckIds.length
+        ? supabase.from("flashcard_decks").delete({ count: "exact" }).eq("user_id", userId).in("id", deckIds)
+        : Promise.resolve({ error: null, count: 0 }))
+      : (deckIds.length
+        ? supabase.from("flashcard_decks").update({ subject: fallbackSubject }).eq("user_id", userId).in("id", deckIds)
+        : Promise.resolve({ error: null, count: 0 }));
+
+    const attemptQuery = groupDeleteMode === "delete"
+      ? (attemptIds.length
+        ? supabase.from("quiz_attempts").delete({ count: "exact" }).eq("user_id", userId).in("id", attemptIds)
+        : Promise.resolve({ error: null, count: 0 }))
+      : (attemptIds.length
+        ? supabase.from("quiz_attempts").update({ subject: fallbackSubject }).eq("user_id", userId).in("id", attemptIds)
+        : Promise.resolve({ error: null, count: 0 }));
+
+    const [deckResult, attemptResult] = await Promise.all([deckQuery, attemptQuery]);
+    setDeletingGroup(false);
+
+    if (deckResult.error || attemptResult.error) {
+      console.error("Library group delete failed:", {
+        subject: groupDeleteTarget.subject,
+        mode: groupDeleteMode,
+        deckError: deckResult.error,
+        attemptError: attemptResult.error,
+      });
+      setLibraryError(deckResult.error?.message || attemptResult.error?.message || "Could not delete this Library group.");
+      return;
+    }
+
+    const deckIdSet = new Set(deckIds);
+    const attemptIdSet = new Set(attemptIds);
+    if (groupDeleteMode === "delete") {
+      setDecks((current) => current.filter((deck) => !deckIdSet.has(deck.id)));
+      setAttempts((current) => current.filter((attempt) => !attemptIdSet.has(attempt.id)));
+      setLibraryStatus(`Deleted "${groupDeleteTarget.subject}" and ${deckIds.length + attemptIds.length} contained resources.`);
+    } else {
+      setDecks((current) => current.map((deck) => (
+        deckIdSet.has(deck.id) ? { ...deck, subject: fallbackSubject } : deck
+      )));
+      setAttempts((current) => current.map((attempt) => (
+        attemptIdSet.has(attempt.id) ? { ...attempt, subject: fallbackSubject } : attempt
+      )));
+      setLibraryStatus(`Moved "${groupDeleteTarget.subject}" resources to ${fallbackSubject}.`);
+    }
+
+    setGroupDeleteTarget(null);
   }
 
   // Find appropriate icon for a subject name
@@ -295,6 +500,9 @@ export default function MyLibrary({ session, onClose, onOpenDeck }) {
       </section>
 
       {/* Loading state */}
+      {libraryStatus && <p className="mb-4 text-sm mono text-emerald-500 text-center">{libraryStatus}</p>}
+      {libraryError && <p className="mb-4 text-sm mono text-red-400 text-center">{libraryError}</p>}
+
       {loading && (
         <div className="py-20 text-center">
           <span className="btn-spinner inline-block mr-2" />
@@ -327,8 +535,6 @@ export default function MyLibrary({ session, onClose, onOpenDeck }) {
       {!loading && filteredGroups.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {filteredGroups.map((group) => {
-            const hasDecks = group.decks.length > 0;
-            const hasAttempts = group.attempts.length > 0;
             const resourcesCount = group.decks.length + group.attempts.length;
 
             // Get last updated date cleanly from real data
@@ -360,23 +566,46 @@ export default function MyLibrary({ session, onClose, onOpenDeck }) {
                               type="text"
                               value={draftSubject}
                               onChange={(e) => setDraftSubject(e.target.value)}
-                              onKeyDown={(e) => e.key === "Enter" && saveSubjectRename(group.subject)}
+                              onClick={(event) => event.stopPropagation()}
+                              onKeyDown={(event) => {
+                                event.stopPropagation();
+                                if (event.key === "Enter") saveSubjectRename(group.subject);
+                                if (event.key === "Escape") cancelRename();
+                              }}
                               autoFocus
                               disabled={renaming}
                               className="rounded border border-gray-300 dark:border-white/15 bg-white dark:bg-neutral-800 text-slate-900 dark:text-white px-2 py-1 text-xs outline-none focus:border-orange-500"
                             />
-                            <button type="button" className="secondary p-1" disabled={renaming} onClick={() => saveSubjectRename(group.subject)} aria-label="Confirm Rename">
+                            <button
+                              type="button"
+                              className="secondary p-1"
+                              disabled={renaming}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                saveSubjectRename(group.subject);
+                              }}
+                              aria-label="Confirm Rename"
+                            >
                               <Check size={12} />
                             </button>
-                            <button type="button" className="secondary p-1" disabled={renaming} onClick={() => setEditingSubject(null)} aria-label="Cancel Rename">
+                            <button
+                              type="button"
+                              className="secondary p-1"
+                              disabled={renaming}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                cancelRename();
+                              }}
+                              aria-label="Cancel Rename"
+                            >
                               <X size={12} />
                             </button>
                           </div>
                         ) : (
                           <h4 
-                            onClick={() => {
-                              setEditingSubject(group.subject);
-                              setDraftSubject(group.subject);
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              beginRename(group.subject);
                             }}
                             className="text-sm font-bold text-slate-800 dark:text-white flex items-center gap-1.5 cursor-pointer hover:text-orange-500 transition-colors"
                             title="Click to rename subject tag"
@@ -388,8 +617,31 @@ export default function MyLibrary({ session, onClose, onOpenDeck }) {
                       </div>
                     </div>
 
-                    <div className="text-right text-[10px] font-mono text-gray-500">
-                      Files: {resourcesCount}
+                    <div className="library-group-actions">
+                      <div className="text-right text-[10px] font-mono text-gray-500">
+                        Files: {resourcesCount}
+                      </div>
+                      <button
+                        type="button"
+                        className="library-resource-menu-trigger"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenMenu(openMenu === `group-${group.subject}` ? null : `group-${group.subject}`);
+                        }}
+                        aria-label={`More options for ${group.subject}`}
+                      >
+                        <MoreVertical size={14} />
+                      </button>
+                      {openMenu === `group-${group.subject}` && (
+                        <div className="library-resource-menu library-group-menu">
+                          <button type="button" onClick={() => beginRename(group.subject)}>
+                            <Pencil size={13} /> Rename
+                          </button>
+                          <button type="button" onClick={() => requestDeleteGroup(group)}>
+                            <Trash2 size={13} /> Delete group
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -417,41 +669,78 @@ export default function MyLibrary({ session, onClose, onOpenDeck }) {
 
                   {/* Resources items list */}
                   <div className="flex flex-col gap-1.5 max-h-[140px] overflow-y-auto mb-4 pr-1">
-                    
                     {/* Decks inside cards */}
                     {group.decks.map((deck) => (
-                      <button
-                        key={deck.id}
-                        type="button"
-                        className="flex items-center justify-between text-left text-xs bg-neutral-50 dark:bg-neutral-800/40 hover:bg-orange-500/10 border border-gray-300 dark:border-white/5 rounded-lg p-2 transition-colors cursor-pointer w-full"
-                        onClick={() => setViewingDeck(deck)}
-                      >
-                        <span className="flex items-center gap-2 truncate font-semibold text-slate-800 dark:text-slate-300">
-                          <BookOpen size={13} className="text-orange-500" />
-                          <span className="truncate">{deck.module_name}</span>
-                        </span>
-                        <span className="text-[9px] font-mono text-gray-500 whitespace-nowrap ml-2">
-                          {deck.cards?.length || 0} cards
-                        </span>
-                      </button>
+                      <div key={deck.id} className="library-resource-row">
+                        <button
+                          type="button"
+                          className="library-resource-main"
+                          onClick={() => setViewingDeck(deck)}
+                        >
+                          <span className="flex items-center gap-2 truncate font-semibold text-slate-800 dark:text-slate-300">
+                            <BookOpen size={13} className="text-orange-500" />
+                            <span className="truncate">{deck.module_name}</span>
+                          </span>
+                          <span className="text-[9px] font-mono text-gray-500 whitespace-nowrap ml-2">
+                            {deck.cards?.length || 0} cards
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="library-resource-menu-trigger"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setOpenMenu(openMenu === `deck-${deck.id}` ? null : `deck-${deck.id}`);
+                          }}
+                          aria-label={`More options for ${deck.module_name}`}
+                        >
+                          <MoreVertical size={14} />
+                        </button>
+                        {openMenu === `deck-${deck.id}` && (
+                          <div className="library-resource-menu">
+                            <button type="button" onClick={() => requestDeleteResource("flashcards", deck)}>
+                              <Trash2 size={13} /> Delete
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     ))}
 
                     {/* Attempts inside cards */}
                     {group.attempts.map((attempt) => (
-                      <button
-                        key={attempt.id}
-                        type="button"
-                        className="flex items-center justify-between text-left text-xs bg-neutral-50 dark:bg-neutral-800/40 hover:bg-orange-500/10 border border-gray-300 dark:border-white/5 rounded-lg p-2 transition-colors cursor-pointer w-full"
-                        onClick={() => setViewingAttempt(attempt)}
-                      >
-                        <span className="flex items-center gap-2 truncate font-semibold text-slate-800 dark:text-slate-300">
-                          <Brain size={13} className="text-orange-500" />
-                          <span className="truncate">{attempt.module_name}</span>
-                        </span>
-                        <span className="text-[9px] font-mono text-gray-500 whitespace-nowrap ml-2">
-                          Acc: {attempt.total_questions > 0 ? Math.round((attempt.score / attempt.total_questions)*100) : 0}%
-                        </span>
-                      </button>
+                      <div key={attempt.id} className="library-resource-row">
+                        <button
+                          type="button"
+                          className="library-resource-main"
+                          onClick={() => setViewingAttempt(attempt)}
+                        >
+                          <span className="flex items-center gap-2 truncate font-semibold text-slate-800 dark:text-slate-300">
+                            <Brain size={13} className="text-orange-500" />
+                            <span className="truncate">{attempt.module_name}</span>
+                          </span>
+                          <span className="text-[9px] font-mono text-gray-500 whitespace-nowrap ml-2">
+                            Acc: {attempt.total_questions > 0 ? Math.round((attempt.score / attempt.total_questions)*100) : 0}%
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="library-resource-menu-trigger"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setOpenMenu(openMenu === `quiz-${attempt.id}` ? null : `quiz-${attempt.id}`);
+                          }}
+                          aria-label={`More options for ${attempt.module_name}`}
+                        >
+                          <MoreVertical size={14} />
+                        </button>
+                        {openMenu === `quiz-${attempt.id}` && (
+                          <div className="library-resource-menu">
+                            <button type="button" onClick={() => requestDeleteResource("quiz", attempt)}>
+                              <Trash2 size={13} /> Delete
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     ))}
 
                   </div>
@@ -469,6 +758,108 @@ export default function MyLibrary({ session, onClose, onOpenDeck }) {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="auth-modal-overlay" onClick={() => !deleting && setDeleteTarget(null)}>
+          <div className="auth-modal-box" onClick={(event) => event.stopPropagation()}>
+            <div className="auth-shell" style={{ maxWidth: "480px" }}>
+              <button
+                type="button"
+                className="auth-modal-close"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                aria-label="Close delete confirmation"
+              >
+                <X size={16} />
+              </button>
+              <span className="setup-label">delete_resource</span>
+              <h3 className="feature-page-title text-left">Delete resource?</h3>
+              <p className="feature-page-copy text-sm">
+                Delete <strong>{resourceTitle(deleteTarget.resource)}</strong>? This removes this generated{" "}
+                {deleteTarget.type === "flashcards" ? "flashcard deck" : "quiz attempt"} only. The source PDF and
+                unrelated Library resources stay unchanged.
+              </p>
+
+              <div className="flashcard-actions">
+                <button type="button" className="secondary" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="secondary text-red-500 border-red-500/30"
+                  onClick={confirmDeleteResource}
+                  disabled={deleting}
+                >
+                  {deleting ? "Deleting..." : "Delete"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {groupDeleteTarget && (
+        <div className="auth-modal-overlay" onClick={() => !deletingGroup && setGroupDeleteTarget(null)}>
+          <div className="auth-modal-box" onClick={(event) => event.stopPropagation()}>
+            <div className="auth-shell" style={{ maxWidth: "500px" }}>
+              <button
+                type="button"
+                className="auth-modal-close"
+                onClick={() => setGroupDeleteTarget(null)}
+                disabled={deletingGroup}
+                aria-label="Close delete group confirmation"
+              >
+                <X size={16} />
+              </button>
+              <span className="setup-label">delete_group</span>
+              <h3 className="feature-page-title text-left">Delete "{groupDeleteTarget.subject}"?</h3>
+              <p className="feature-page-copy text-sm">
+                This affects only resources currently grouped under "{groupDeleteTarget.subject}".
+                Source PDF documents are not deleted.
+              </p>
+
+              <div className="flex flex-col gap-3 my-5">
+                <label className="quiz-option">
+                  <input
+                    type="radio"
+                    name="groupDeleteMode"
+                    checked={groupDeleteMode === "move"}
+                    onChange={() => setGroupDeleteMode("move")}
+                    disabled={deletingGroup}
+                    className="mr-2"
+                  />
+                  Delete group only — move resources to Uncategorized
+                </label>
+                <label className="quiz-option">
+                  <input
+                    type="radio"
+                    name="groupDeleteMode"
+                    checked={groupDeleteMode === "delete"}
+                    onChange={() => setGroupDeleteMode("delete")}
+                    disabled={deletingGroup}
+                    className="mr-2"
+                  />
+                  Delete group and all contained flashcard decks/quizzes
+                </label>
+              </div>
+
+              <div className="flashcard-actions">
+                <button type="button" className="secondary" onClick={() => setGroupDeleteTarget(null)} disabled={deletingGroup}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="secondary text-red-500 border-red-500/30"
+                  onClick={confirmDeleteGroup}
+                  disabled={deletingGroup}
+                >
+                  {deletingGroup ? "Deleting..." : "Delete group"}
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </main>
