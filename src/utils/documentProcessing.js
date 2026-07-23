@@ -1,6 +1,6 @@
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const MAX_OCR_UPLOAD_BYTES = 12 * 1024 * 1024;
-export const MAX_GENERATION_BATCH_CHARS = 11000;
+export const MAX_GENERATION_BATCH_CHARS = 8000;
 export const SUPPORTED_UPLOAD_EXTENSIONS = new Set(["txt", "md", "pdf", "pptx"]);
 
 function makeId(prefix) {
@@ -236,6 +236,27 @@ function fallbackTextChunks(text) {
   }));
 }
 
+function sourceChunkDedupeKey(text) {
+  return normalizeStudyContent(text)
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 700);
+}
+
+function dedupeSourceUnits(units) {
+  const seen = new Set();
+  return units.filter((unit) => {
+    const key = sourceChunkDedupeKey(unit.text);
+    if (!key) return false;
+    const dedupeKey = key.length < 80 ? `short:${key}` : key;
+    if (seen.has(dedupeKey)) return false;
+    seen.add(dedupeKey);
+    return true;
+  });
+}
+
 function hardSplitText(text, maxChars) {
   const parts = [];
   let remaining = text;
@@ -266,7 +287,7 @@ function formatBatchUnit(unit) {
 
 export function createGenerationBatches({ text, documents, selectedModule, maxChars = MAX_GENERATION_BATCH_CHARS }) {
   const units = selectedDocumentChunks(documents, selectedModule);
-  const sourceUnits = units.length > 0 ? units : fallbackTextChunks(text);
+  const sourceUnits = dedupeSourceUnits(units.length > 0 ? units : fallbackTextChunks(text));
   const batches = [];
   let currentUnits = [];
   let currentLength = 0;
@@ -334,6 +355,113 @@ export function mergeFlashcardBatches(batchCards, maxCards = 24) {
     seen.add(key);
     merged.push({ ...card, question, answer });
     if (merged.length >= maxCards) break;
+  }
+  return merged;
+}
+
+const VALID_QUIZ_TYPES = new Set(["mcq", "true_false", "fill_blank", "short_answer", "numerical", "select_all"]);
+
+export function normalizeQuizQuestion(question) {
+  return String(question || "")
+    .toLowerCase()
+    .replace(/[^\w\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function validateQuizQuestion(question) {
+  const type = String(question?.type || "mcq").trim();
+  const prompt = String(question?.question || "").trim();
+  const explanation = String(question?.explanation || "").trim();
+
+  if (!VALID_QUIZ_TYPES.has(type) || prompt.length < 12 || explanation.length < 8) return null;
+
+  const normalized = {
+    ...question,
+    type,
+    question: prompt,
+    explanation,
+  };
+
+  if (question?.topic) normalized.topic = String(question.topic).trim();
+  if (question?.difficulty) normalized.difficulty = String(question.difficulty).trim();
+
+  if (type === "mcq") {
+    const options = Array.isArray(question.options)
+      ? question.options.map((option) => String(option || "").trim()).filter(Boolean)
+      : [];
+    if (options.length < 2 || !Number.isInteger(question.correctIndex) || question.correctIndex < 0 || question.correctIndex >= options.length) {
+      return null;
+    }
+    normalized.options = options;
+    normalized.correctIndex = question.correctIndex;
+  }
+
+  if (type === "true_false") {
+    const options = ["True", "False"];
+    if (!Number.isInteger(question.correctIndex) || question.correctIndex < 0 || question.correctIndex > 1) return null;
+    normalized.options = options;
+    normalized.correctIndex = question.correctIndex;
+  }
+
+  if (type === "fill_blank") {
+    const correctAnswer = String(question.correctAnswer || "").trim();
+    if (!correctAnswer) return null;
+    normalized.correctAnswer = correctAnswer;
+    normalized.acceptableAnswers = Array.isArray(question.acceptableAnswers)
+      ? question.acceptableAnswers.map((answer) => String(answer || "").trim()).filter(Boolean)
+      : [];
+  }
+
+  if (type === "short_answer" || type === "numerical") {
+    const modelAnswer = String(question.modelAnswer || "").trim();
+    if (!modelAnswer) return null;
+    normalized.modelAnswer = modelAnswer;
+  }
+
+  if (type === "select_all") {
+    const options = Array.isArray(question.options)
+      ? question.options.map((option) => String(option || "").trim()).filter(Boolean)
+      : [];
+    const correctIndices = Array.isArray(question.correctIndices)
+      ? question.correctIndices.filter((index) => Number.isInteger(index) && index >= 0 && index < options.length)
+      : [];
+    if (options.length < 2 || correctIndices.length === 0) return null;
+    normalized.options = options;
+    normalized.correctIndices = [...new Set(correctIndices)];
+  }
+
+  return normalized;
+}
+
+export function mergeQuizBatches(batchQuestions, maxQuestions = 20) {
+  const seen = new Set();
+  const merged = [];
+  for (const question of batchQuestions.flat()) {
+    const validQuestion = validateQuizQuestion(question);
+    if (!validQuestion) continue;
+    const key = normalizeQuizQuestion(validQuestion.question);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(validQuestion);
+    if (merged.length >= maxQuestions) break;
+  }
+  return merged;
+}
+
+export function mergeRevisionBatches(batchItems, maxItems = 60) {
+  const seen = new Set();
+  const merged = [];
+  for (const item of batchItems.flat()) {
+    const type = String(item?.type || "").trim();
+    const title = String(item?.title || "").trim();
+    const content = String(item?.content || "").trim();
+    if (!type || !title || content.length < 8) continue;
+    const key = `${type.toLowerCase()}::${normalizeQuizQuestion(title)}::${normalizeQuizQuestion(content).slice(0, 120)}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ ...item, type, title, content });
+    if (merged.length >= maxItems) break;
   }
   return merged;
 }

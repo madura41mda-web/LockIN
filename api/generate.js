@@ -28,6 +28,30 @@ function validatePayload(mode, payload) {
   return null;
 }
 
+function retryAfterHeaderToSeconds(value) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.ceil(seconds));
+  const timestamp = Date.parse(value);
+  if (Number.isFinite(timestamp)) return Math.max(0, Math.ceil((timestamp - Date.now()) / 1000));
+  return null;
+}
+
+function sendStructuredError(res, httpStatus, { code, message, retryAfter = null, retryable = false, details = undefined }) {
+  if (retryAfter !== null && retryAfter !== undefined) {
+    res.setHeader("Retry-After", String(retryAfter));
+  }
+  return res.status(httpStatus).json({
+    error: message,
+    status: httpStatus,
+    code,
+    message,
+    retryAfter,
+    retryable,
+    ...(details ? { details } : {}),
+  });
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
@@ -51,7 +75,10 @@ export default async function handler(req, res) {
     });
 
     if (!text || !text.trim()) {
-      return res.status(400).json({ error: "No notes were sent." });
+      return sendStructuredError(res, 400, {
+        code: "EMPTY_NOTES",
+        message: "No notes were sent.",
+      });
     }
 
     if (documentContext) {
@@ -59,7 +86,10 @@ export default async function handler(req, res) {
         mode,
         requestCharCount,
       });
-      return res.status(400).json({ error: "Generation accepts only one bounded text batch at a time." });
+      return sendStructuredError(res, 400, {
+        code: "DOCUMENT_CONTEXT_REJECTED",
+        message: "Generation accepts only one bounded text batch at a time.",
+      });
     }
 
     if (text.length > MAX_GENERATE_TEXT_CHARS) {
@@ -68,14 +98,18 @@ export default async function handler(req, res) {
         textCharCount: text.length,
         maxTextChars: MAX_GENERATE_TEXT_CHARS,
       });
-      return res.status(413).json({
-        error: "This section is too large to generate safely. Split it into smaller batches and try again.",
+      return sendStructuredError(res, 413, {
+        code: "BATCH_TOO_LARGE",
+        message: "This section is too large to generate safely. Split it into smaller batches and try again.",
       });
     }
 
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
-      return res.status(500).json({ error: "Server is missing GROQ_API_KEY." });
+      return sendStructuredError(res, 500, {
+        code: "MISSING_API_KEY",
+        message: "Server is missing GROQ_API_KEY.",
+      });
     }
 
   const isQuestionBank = detectQuestionBank(text);
@@ -144,7 +178,7 @@ Respond ONLY with valid JSON in exactly this format:
   ]
 }`,
 
-    quiz: `Read the study notes below and create 8-12 exam-style quiz questions.
+    quiz: `Read the study notes below and create ${options?.questionsPerBatch || 8} exam-style quiz questions from this batch.
 
 ${commonRules}${focusLine}
 
@@ -209,6 +243,16 @@ ${text}`;
 
     if (!response.ok) {
       const errorText = await response.text();
+      const retryAfter = retryAfterHeaderToSeconds(response.headers.get("Retry-After"));
+      const retryable = response.status === 429 || response.status >= 500 || response.status === 408;
+      const code = response.status === 429
+        ? "AI_RATE_LIMIT"
+        : retryable
+          ? "AI_PROVIDER_TEMPORARY_ERROR"
+          : "AI_PROVIDER_ERROR";
+      const message = response.status === 429
+        ? "The AI service is rate limited. Retrying shortly."
+        : `The AI service returned an error (${response.status}).`;
       console.error("Groq API Error:", {
         status: response.status,
         statusText: response.statusText,
@@ -217,10 +261,16 @@ ${text}`;
         requestCharCount,
         batchIndex,
         batchCount,
+        code,
+        retryAfter,
+        retryable,
         body: errorText,
       });
-      return res.status(500).json({
-        error: `The AI service returned an error (${response.status}). Try a smaller or clearer document.`,
+      return sendStructuredError(res, response.status, {
+        code,
+        message,
+        retryAfter,
+        retryable,
       });
     }
 
@@ -228,7 +278,11 @@ ${text}`;
     const raw = data.choices?.[0]?.message?.content;
 
     if (!raw) {
-      return res.status(500).json({ error: "No response received from the AI." });
+      return sendStructuredError(res, 502, {
+        code: "AI_EMPTY_RESPONSE",
+        message: "No response received from the AI.",
+        retryable: true,
+      });
     }
 
     let parsed = null;
@@ -259,8 +313,10 @@ ${text}`;
     } catch (parseErr) {
       console.error("JSON Parsing/Repair failed for Groq response.");
       console.error("Raw response content was:", raw);
-      return res.status(500).json({
-        error: "Failed to parse the generated study material. Please try again.",
+      return sendStructuredError(res, 502, {
+        code: "AI_PARSE_ERROR",
+        message: "Failed to parse the generated study material. Please try again.",
+        retryable: true,
         details: parseErr.message
       });
     }
@@ -271,16 +327,26 @@ ${text}`;
         mode,
         keys: parsed && typeof parsed === "object" ? Object.keys(parsed) : [],
       });
-      return res.status(422).json({ error: validationError });
+      return sendStructuredError(res, 422, {
+        code: "AI_VALIDATION_ERROR",
+        message: validationError,
+      });
     }
 
     return res.status(200).json(parsed);
   } catch (err) {
     console.error("Fetch/API invocation error:", err);
-    return res.status(500).json({ error: err.message || "Could not generate study material." });
+    return sendStructuredError(res, 502, {
+      code: "AI_FETCH_ERROR",
+      message: err.message || "Could not generate study material.",
+      retryable: true,
+    });
   }
   } catch (globalErr) {
     console.error("Global API Error:", globalErr);
-    return res.status(500).json({ error: globalErr.message || "Unexpected server error." });
+    return sendStructuredError(res, 500, {
+      code: "GENERATE_ROUTE_ERROR",
+      message: globalErr.message || "Unexpected server error.",
+    });
   }
 }

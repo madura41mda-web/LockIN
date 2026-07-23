@@ -37,13 +37,13 @@ export default function CreateBattleForm({
     setLoading(true);
     onError("");
     try {
-      const data = await callGenerate("quiz", { difficulty, types: ["mcq"] });
+      const data = await callGenerate("quiz", { difficulty, types: ["mcq"], targetQuestionCount: questionCount });
       const mcqOnly = (data.quiz || [])
         .filter((q) => q.type === "mcq" && Array.isArray(q.options))
         .slice(0, questionCount);
 
-      if (mcqOnly.length < 2) {
-        onError("Could not generate enough multiple-choice questions from these notes. Try different notes or a lower question count.");
+      if (mcqOnly.length < questionCount) {
+        onError(`Generated ${mcqOnly.length} of ${questionCount} valid questions. Please retry or choose a lower question count.`);
         return;
       }
 

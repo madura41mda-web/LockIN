@@ -15,7 +15,14 @@ import BattleMode from "./components/battle/BattleMode";
 import FlowState, { TIMER_MODES } from "./components/FlowState";
 import StudyLobby from "./components/StudyLobby";
 import { parseModules } from "./utils/parseModules";
-import { createGenerationBatches, mergeFlashcardBatches } from "./utils/documentProcessing";
+import {
+  createGenerationBatches,
+  MAX_GENERATION_BATCH_CHARS,
+  mergeFlashcardBatches,
+  mergeQuizBatches,
+  mergeRevisionBatches,
+} from "./utils/documentProcessing";
+import { optionalUuid, persistedDocumentId } from "./utils/idValidation";
 import { useFlowAmbience, loadAmbiencePrefs } from "./utils/useFlowAmbience";
 import { supabase } from "./supabaseClient";
 
@@ -71,6 +78,11 @@ const FEATURES = [
 ];
 
 const FEATURE_IDS = new Set(FEATURES.map((feature) => feature.id));
+const MAX_GENERATE_REQUEST_CHARS = 12000;
+const MAX_GENERATE_BATCH_RETRIES = 3;
+const MAX_QUIZ_BATCH_ATTEMPTS = 6;
+const DEFAULT_QUIZ_TARGET = 12;
+const DEFAULT_BATTLE_MAX_TARGET = 24;
 
 function validArray(value) {
   return Array.isArray(value) && value.length > 0;
@@ -86,6 +98,31 @@ function validateGeneratedData(mode, data) {
   if (mode === "revision" && !validArray(data?.revision)) {
     throw new Error("No usable revision notes were generated. Try a clearer document or a smaller section.");
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterMs(value) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const timestamp = Date.parse(value);
+  if (Number.isFinite(timestamp)) return Math.max(0, timestamp - Date.now());
+  return null;
+}
+
+function retryDelayMs(attempt, retryAfter) {
+  const retryAfterMs = parseRetryAfterMs(retryAfter);
+  if (retryAfterMs !== null) return Math.min(retryAfterMs, 15000);
+  const base = 2000 * 2 ** Math.max(0, attempt - 1);
+  const jitter = Math.floor(Math.random() * 500);
+  return Math.min(base + jitter, 15000);
+}
+
+function isRetryableGenerationError(error) {
+  return Boolean(error?.retryable) && (error.status === 429 || error.status >= 500);
 }
 
 function getModeFromHash() {
@@ -497,69 +534,161 @@ export default function App() {
     return selectedModule === "__ALL__" ? noteText : modules[selectedModule] || noteText;
   }
 
-  async function callGenerate(mode, options) {
-    const selectedText = getSelectedText();
-    const requestBody = { text: selectedText, mode, options };
-    const requestChars = JSON.stringify(requestBody).length;
-    console.info("LockIN generate request", {
-      mode,
-      requestChars,
-      textChars: selectedText.length,
-      chunkCount: options?.batchMeta?.chunkCount || 0,
-      batch: options?.batchMeta ? `${options.batchMeta.index}/${options.batchMeta.count}` : "single",
-    });
-
-    const response = await fetch("/api/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      let errMsg = "Something went wrong.";
-      try {
-        const data = await response.json();
-        errMsg = data.error || errMsg;
-      } catch (e) {
-        errMsg = `Server error (${response.status}): ${response.statusText || "Internal Server Error"}`;
-      }
-      throw new Error(errMsg);
-    }
-
-    try {
-      const data = await response.json();
-      validateGeneratedData(mode, data);
-      return data;
-    } catch (e) {
-      if (e instanceof Error && e.message.startsWith("No usable")) throw e;
-      throw new Error("Failed to parse server response.");
-    }
+  function currentPersistedDocumentId(context) {
+    return optionalUuid(currentDocumentId, context);
   }
 
-  async function generateFlashcardsInBatches(options = {}) {
+  function normalizeGenerateOptions(options = {}) {
+    const normalized = { ...options };
+    if (Array.isArray(normalized.avoidQuestions)) {
+      normalized.avoidQuestions = normalized.avoidQuestions
+        .map((question) => String(question || "").trim())
+        .filter(Boolean)
+        .map((question) => question.slice(0, 140))
+        .slice(0, 25);
+    }
+    if (Array.isArray(normalized.types)) {
+      normalized.types = normalized.types.map((type) => String(type || "").trim()).filter(Boolean).slice(0, 6);
+    }
+    return normalized;
+  }
+
+  function safeBatchTextChars(mode, options) {
+    const sampleOptions = {
+      ...options,
+      cardsPerBatch: mode === "flashcards" ? 6 : undefined,
+      questionsPerBatch: mode === "quiz" ? 8 : undefined,
+      batchMeta: {
+        index: 99,
+        count: 99,
+        chunkCount: 99,
+        charCount: 0,
+        sources: [],
+      },
+      batchMode: true,
+      totalBatches: 99,
+    };
+    const overheadChars = JSON.stringify({ text: "", mode, options: sampleOptions }).length;
+    return Math.max(3200, Math.min(MAX_GENERATION_BATCH_CHARS, MAX_GENERATE_REQUEST_CHARS - overheadChars - 1000));
+  }
+
+  function generationTargets(mode, options, batchCount) {
+    if (mode === "flashcards") {
+      const finalTarget = options.extraBatch ? 12 : 24;
+      return {
+        finalTarget,
+        perBatch: batchCount > 1 ? Math.min(6, Math.max(3, Math.ceil(finalTarget / batchCount) + 1)) : Math.min(12, finalTarget),
+      };
+    }
+
+    if (mode === "quiz") {
+      const hasRequestedCount = options.targetQuestionCount !== undefined || options.questionCount !== undefined;
+      const requested = Number(options.targetQuestionCount || options.questionCount || DEFAULT_QUIZ_TARGET);
+      const finalTarget = Math.min(DEFAULT_BATTLE_MAX_TARGET, Math.max(2, Number.isFinite(requested) ? requested : DEFAULT_QUIZ_TARGET));
+      return {
+        finalTarget,
+        perBatch: batchCount > 1 ? Math.min(5, Math.max(3, Math.ceil(finalTarget / Math.min(batchCount, 3)))) : Math.min(12, finalTarget),
+        requireExact: hasRequestedCount,
+      };
+    }
+
+    return { finalTarget: 60, perBatch: null, requireExact: false };
+  }
+
+  function mergeGeneratedBatches(mode, batchPayloads, targets) {
+    if (mode === "flashcards") {
+      const flashcards = mergeFlashcardBatches(batchPayloads.map((payload) => payload.flashcards || []), targets.finalTarget);
+      if (!validArray(flashcards)) throw new Error("No usable flashcards were generated after combining batches.");
+      return { flashcards };
+    }
+
+    if (mode === "quiz") {
+      const quiz = mergeQuizBatches(batchPayloads.map((payload) => payload.quiz || []), targets.finalTarget);
+      if (targets.requireExact && quiz.length < targets.finalTarget) {
+        throw new Error(`Generated ${quiz.length} of ${targets.finalTarget} valid questions. Please retry or choose a lower question count.`);
+      }
+      if (!validArray(quiz)) throw new Error("No usable quiz questions were generated after combining batches.");
+      return { quiz };
+    }
+
+    if (mode === "revision") {
+      const revision = mergeRevisionBatches(batchPayloads.map((payload) => payload.revision || []), targets.finalTarget);
+      if (!validArray(revision)) throw new Error("No usable revision notes were generated after combining batches.");
+      return { revision };
+    }
+
+    throw new Error("Unsupported generation mode.");
+  }
+
+  async function callGenerate(mode, options = {}) {
+    const normalizedOptions = normalizeGenerateOptions(options);
+    const maxChars = safeBatchTextChars(mode, normalizedOptions);
     const batches = createGenerationBatches({
       text: getSelectedText(),
       documents: processedDocuments,
       selectedModule,
+      maxChars,
     });
 
     if (batches.length === 0) {
-      throw new Error("No usable study content was found for flashcard generation.");
+      throw new Error("No usable study content was found for generation.");
     }
 
-    console.info("LockIN flashcard batching", {
+    const targets = generationTargets(mode, normalizedOptions, batches.length);
+
+    console.info("LockIN generation batching", {
+      mode,
       batchCount: batches.length,
+      maxBatchChars: maxChars,
       batchSizes: batches.map((batch) => batch.text.length),
       chunkCounts: batches.map((batch) => batch.chunkCount),
+      finalTarget: targets.finalTarget,
+      perBatchTarget: targets.perBatch,
     });
 
-    const allCards = [];
+    const batchPayloads = [];
+    const failedBatches = [];
+    let attemptedBatches = 0;
+    const maxBatchesToAttempt = mode === "quiz"
+      ? Math.min(batches.length, Math.max(2, Math.min(MAX_QUIZ_BATCH_ATTEMPTS, targets.finalTarget)))
+      : batches.length;
+
     for (const batch of batches) {
+      if (attemptedBatches >= maxBatchesToAttempt) {
+        console.info("LockIN generation stopped at max attempted batches", {
+          mode,
+          attemptedBatches,
+          maxBatchesToAttempt,
+          batchCount: batches.length,
+        });
+        break;
+      }
+
+      const collectedValid = mode === "quiz"
+        ? mergeQuizBatches(batchPayloads.map((payload) => payload.quiz || []), targets.finalTarget).length
+        : 0;
+
+      if (mode === "quiz" && collectedValid >= targets.finalTarget) {
+        console.info("LockIN generation stopped early", {
+          mode,
+          collectedValid,
+          requested: targets.finalTarget,
+          attemptedBatches,
+          batchCount: batches.length,
+        });
+        break;
+      }
+
+      const remainingQuestions = mode === "quiz" ? Math.max(0, targets.finalTarget - collectedValid) : null;
+      const questionsForBatch = mode === "quiz" ? Math.min(remainingQuestions, targets.perBatch || remainingQuestions) : undefined;
+
       setGenerationStatus(`Generating batch ${batch.index} of ${batch.count}`);
+      attemptedBatches += 1;
       try {
-        const data = await callGenerateBatch("flashcards", batch.text, {
-          ...options,
-          cardsPerBatch: batches.length > 1 ? 5 : 12,
+        const batchOptions = {
+          ...normalizedOptions,
+          cardsPerBatch: mode === "flashcards" ? targets.perBatch : undefined,
+          questionsPerBatch: mode === "quiz" ? questionsForBatch : undefined,
           batchMeta: {
             index: batch.index,
             count: batch.count,
@@ -569,47 +698,150 @@ export default function App() {
           },
           batchMode: true,
           totalBatches: batch.count,
+        };
+        console.info("LockIN generation batch start", {
+          mode,
+          batch: `${batch.index}/${batch.count}`,
+          attemptedBatches,
+          maxBatchesToAttempt,
+          remainingQuestions,
+          collectedValid,
+          requestedForBatch: questionsForBatch,
         });
-        allCards.push(data.flashcards || []);
+        const data = await callGenerateBatchWithRetry(mode, batch.text, batchOptions);
+        batchPayloads.push(data);
+
+        if (mode === "quiz") {
+          const nextCollected = mergeQuizBatches(batchPayloads.map((payload) => payload.quiz || []), targets.finalTarget).length;
+          console.info("LockIN generation batch collected", {
+            mode,
+            batch: `${batch.index}/${batch.count}`,
+            collectedValid: nextCollected,
+            requested: targets.finalTarget,
+          });
+        }
       } catch (err) {
+        const failedBatch = {
+          index: batch.index,
+          count: batch.count,
+          status: err.status,
+          code: err.code,
+          retryable: Boolean(err.retryable),
+          message: err.message,
+        };
+        failedBatches.push(failedBatch);
+        console.warn("LockIN generation batch failed after bounded retries", failedBatch);
+
+        if (mode === "quiz" && (err.retryable || err.status === 422)) {
+          continue;
+        }
+
         throw new Error(`Batch ${batch.index} of ${batch.count} failed: ${err.message}`);
       }
     }
 
-    setGenerationStatus("Combining flashcards");
-    const mergedCards = mergeFlashcardBatches(allCards);
-    if (!validArray(mergedCards)) {
-      throw new Error("No usable flashcards were generated after combining batches.");
-    }
-    return { flashcards: mergedCards };
+    setGenerationStatus(`Combining ${mode === "flashcards" ? "flashcards" : mode === "quiz" ? "questions" : "revision notes"}`);
+    const merged = mergeGeneratedBatches(mode, batchPayloads, targets);
+    console.info("LockIN generation complete", {
+      mode,
+      attemptedBatches,
+      batchCount: batches.length,
+      stoppedEarly: mode === "quiz" && (merged.quiz || []).length >= targets.finalTarget && attemptedBatches < batches.length,
+      failedBatches,
+      collectedValid: mode === "quiz" ? (merged.quiz || []).length : undefined,
+    });
+    return merged;
   }
 
-  async function callGenerateBatch(mode, text, options) {
+  async function callGenerateBatchWithRetry(mode, text, options) {
+    for (let attempt = 1; attempt <= MAX_GENERATE_BATCH_RETRIES + 1; attempt += 1) {
+      try {
+        return await callGenerateBatch(mode, text, options, attempt);
+      } catch (err) {
+        const canRetry = isRetryableGenerationError(err) && attempt <= MAX_GENERATE_BATCH_RETRIES;
+        if (!canRetry) throw err;
+
+        const delayMs = retryDelayMs(attempt, err.retryAfter);
+        console.warn("LockIN generate retry scheduled", {
+          mode,
+          batch: `${options?.batchMeta?.index || 1}/${options?.batchMeta?.count || 1}`,
+          attempt,
+          nextAttempt: attempt + 1,
+          status: err.status,
+          code: err.code,
+          retryAfter: err.retryAfter,
+          retryDelayMs: delayMs,
+        });
+        setGenerationStatus(`Rate limited. Retrying batch ${options?.batchMeta?.index || 1} in ${Math.ceil(delayMs / 1000)}s`);
+        await sleep(delayMs);
+      }
+    }
+
+    throw new Error("Generation retry loop exited unexpectedly.");
+  }
+
+  async function callGenerateBatch(mode, text, options, attempt = 1) {
     const requestBody = { text, mode, options };
-    const requestChars = JSON.stringify(requestBody).length;
+    const serializedBody = JSON.stringify(requestBody);
+    const requestChars = serializedBody.length;
+    if (requestChars > MAX_GENERATE_REQUEST_CHARS) {
+      const error = new Error(
+        `Batch ${options?.batchMeta?.index || 1} request is too large (${requestChars} chars). Split the source into smaller sections.`
+      );
+      error.status = 413;
+      error.code = "CLIENT_REQUEST_TOO_LARGE";
+      error.retryable = false;
+      throw error;
+    }
+    if (typeof window !== "undefined") {
+      window.__LOCKIN_LARGEST_GENERATE_REQUEST_CHARS = Math.max(
+        Number(window.__LOCKIN_LARGEST_GENERATE_REQUEST_CHARS || 0),
+        requestChars
+      );
+    }
     console.info("LockIN generate request", {
       mode,
       requestChars,
+      maxRequestChars: MAX_GENERATE_REQUEST_CHARS,
       textChars: text.length,
       chunkCount: options?.batchMeta?.chunkCount || 0,
-      batch: options?.batchMeta ? `${options.batchMeta.index}/${options.batchMeta.count}` : "single",
+      batch: `${options?.batchMeta?.index || 1}/${options?.batchMeta?.count || 1}`,
+      attempt,
+      remainingQuestionCount: mode === "quiz" ? options?.questionsPerBatch : undefined,
     });
 
     const response = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
+      body: serializedBody,
+    });
+
+    console.info("LockIN generate response", {
+      mode,
+      batch: `${options?.batchMeta?.index || 1}/${options?.batchMeta?.count || 1}`,
+      attempt,
+      status: response.status,
+      ok: response.ok,
+      retryAfter: response.headers.get("Retry-After"),
     });
 
     if (!response.ok) {
       let errMsg = "Something went wrong.";
+      let errorPayload = null;
       try {
-        const data = await response.json();
-        errMsg = data.error || errMsg;
+        errorPayload = await response.json();
+        errMsg = errorPayload.message || errorPayload.error || errMsg;
       } catch (e) {
         errMsg = `Server error (${response.status}): ${response.statusText || "Internal Server Error"}`;
       }
-      throw new Error(errMsg);
+      const error = new Error(errMsg);
+      error.status = errorPayload?.status || response.status;
+      error.code = errorPayload?.code || `HTTP_${response.status}`;
+      error.retryAfter = errorPayload?.retryAfter || response.headers.get("Retry-After");
+      error.retryable = typeof errorPayload?.retryable === "boolean"
+        ? errorPayload.retryable
+        : response.status === 429 || response.status >= 500;
+      throw error;
     }
 
     try {
@@ -633,9 +865,7 @@ export default function App() {
     setFlashcards(null);
     setRevision(null);
     try {
-      const data = activeMode === "flashcards"
-        ? await generateFlashcardsInBatches()
-        : await callGenerate(activeMode);
+      const data = await callGenerate(activeMode);
       if (activeMode === "flashcards") {
         setFlashcards(data.flashcards);
         setFlashcardEndMessage("");
@@ -648,7 +878,7 @@ export default function App() {
             module_name: displayModuleName,
             subject: displayModuleName,
             cards: data.flashcards,
-            document_id: currentDocumentId,
+            document_id: currentPersistedDocumentId("flashcard_decks.document_id"),
           });
           if (error) {
             console.error("Auto-save flashcards failed in Supabase:", error);
@@ -739,7 +969,7 @@ export default function App() {
         score: summary.score,
         total_questions: summary.total,
         questions: quizQuestions,
-        document_id: currentDocumentId,
+        document_id: currentPersistedDocumentId("quiz_attempts.document_id"),
       }).then(({ error }) => {
         if (error) {
           console.error("Auto-save quiz attempt failed in Supabase:", error);
@@ -785,7 +1015,7 @@ export default function App() {
     setError(null);
     setFlashcardEndMessage("");
     try {
-      const data = await generateFlashcardsInBatches({ focusTopic: topic });
+      const data = await callGenerate("flashcards", { focusTopic: topic });
       setFlashcards(data.flashcards);
     } catch (err) {
       console.error(err);
@@ -811,7 +1041,7 @@ export default function App() {
     setFlashcardEndMessage("");
 
     try {
-      const data = await generateFlashcardsInBatches({
+      const data = await callGenerate("flashcards", {
         avoidQuestions: currentCards.map((card) => card.question).filter(Boolean),
         extraBatch: true,
       });
@@ -842,7 +1072,7 @@ export default function App() {
   function handleFileRead(fileResult) {
     const documents = fileResult?.documents || [];
     setProcessedDocuments(documents);
-    setCurrentDocumentId(documents[0]?.id || null);
+    setCurrentDocumentId(persistedDocumentId(documents[0]));
     if (fileResult?.fileName) {
       logStudyActivity("upload", `Uploaded note file: ${fileResult.fileName}`);
       try {
@@ -867,7 +1097,7 @@ export default function App() {
         score: quizSummaryData.score,
         total_questions: quizSummaryData.total,
         questions: quizQuestions,
-        document_id: currentDocumentId,
+        document_id: currentPersistedDocumentId("quiz_attempts.document_id"),
       });
       if (error) {
         console.error("Supabase Error [Save Quiz Attempt]:", {
@@ -891,7 +1121,7 @@ export default function App() {
         module_name: displayModuleName,
         subject: displayModuleName,
         cards: flashcards,
-        document_id: currentDocumentId,
+        document_id: currentPersistedDocumentId("flashcard_decks.document_id"),
       });
       if (error) {
         console.error("Supabase Error [Save Flashcard Deck]:", {

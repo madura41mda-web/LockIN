@@ -1,4 +1,5 @@
 import { supabase } from "../../supabaseClient";
+import { optionalUuid } from "../../utils/idValidation";
 
 function randomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -19,13 +20,14 @@ export async function createBattleRoom({
   questions,
 }) {
   const battleCode = randomCode();
+  const safeDocumentId = optionalUuid(documentId, "battle_rooms.document_id");
 
   const { data: room, error: roomError } = await supabase
     .from("battle_rooms")
     .insert({
       battle_code: battleCode,
       host_id: hostId,
-      document_id: documentId || null,
+      document_id: safeDocumentId,
       module_name: moduleName,
       difficulty,
       question_count: questionCount,

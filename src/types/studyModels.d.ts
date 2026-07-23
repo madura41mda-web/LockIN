@@ -1,5 +1,7 @@
 export interface StudyDocument {
   id: string;
+  databaseId?: string;
+  persisted?: boolean;
   filename: string;
   fileType: string;
   fileSize: number;
@@ -14,6 +16,8 @@ export interface StudyDocument {
 
 export interface StudyDocumentChunk {
   id: string;
+  databaseId?: string;
+  persisted?: boolean;
   documentId: string;
   filename: string;
   pageNumber?: string | null;

@@ -224,11 +224,7 @@ export default function FileUpload({ noteText, setNoteText, onFileRead, session,
       const combinedText = composeStudyText(processedDocuments);
       setNoteText(combinedText);
 
-      try {
-        saveProcessedDocumentsLocal(session?.user?.id, processedDocuments);
-      } catch (localErr) {
-        console.error("Failed to save processed documents locally:", localErr);
-      }
+      let documentsForUse = processedDocuments;
 
       if (session) {
         const result = await saveProcessedDocumentsSupabase(supabase, processedDocuments);
@@ -238,15 +234,22 @@ export default function FileUpload({ noteText, setNoteText, onFileRead, session,
             `Processed locally. Cloud document cache failed (${result.error.code || "Supabase error"}). Run migrations 202607230001_study_documents_and_lobby.sql and 202607230002_study_document_extraction_metadata.sql.`
           );
         } else {
+          documentsForUse = result.documents || processedDocuments;
           setUploadStatus(`Processed ${processedDocuments.length} file${processedDocuments.length === 1 ? "" : "s"} and cached for reuse.`);
         }
       } else {
         setUploadStatus(`Processed ${processedDocuments.length} file${processedDocuments.length === 1 ? "" : "s"} locally. Sign in to sync them securely.`);
       }
 
+      try {
+        saveProcessedDocumentsLocal(session?.user?.id, documentsForUse);
+      } catch (localErr) {
+        console.error("Failed to save processed documents locally:", localErr);
+      }
+
       onFileRead?.({
-        fileName: processedDocuments.map((document) => document.filename).join(", "),
-        documents: processedDocuments,
+        fileName: documentsForUse.map((document) => document.filename).join(", "),
+        documents: documentsForUse,
       });
     } catch (err) {
       setFileName("");

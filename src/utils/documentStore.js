@@ -1,3 +1,5 @@
+import { createUuid, isUuid } from "./idValidation";
+
 const LOCAL_DOCUMENTS_KEY = "lockin_processed_documents";
 
 function safeParse(value, fallback) {
@@ -38,7 +40,35 @@ export async function saveProcessedDocumentsSupabase(supabase, documents) {
   const remoteDocuments = documents.filter((document) => document.userId);
   if (remoteDocuments.length === 0) return { saved: false, error: null };
 
-  const documentRows = remoteDocuments.map((document) => ({
+  const syncedDocuments = remoteDocuments.map((document) => {
+    const databaseId = isUuid(document.databaseId)
+      ? document.databaseId
+      : isUuid(document.id)
+        ? document.id
+        : createUuid();
+    return {
+      ...document,
+      id: databaseId,
+      databaseId,
+      persisted: true,
+      chunks: document.chunks.map((chunk) => {
+        const chunkDatabaseId = isUuid(chunk.databaseId)
+          ? chunk.databaseId
+          : isUuid(chunk.id)
+            ? chunk.id
+            : createUuid();
+        return {
+          ...chunk,
+          id: chunkDatabaseId,
+          databaseId: chunkDatabaseId,
+          documentId: databaseId,
+          persisted: true,
+        };
+      }),
+    };
+  });
+
+  const documentRows = syncedDocuments.map((document) => ({
     id: document.id,
     user_id: document.userId,
     filename: document.filename,
@@ -52,7 +82,7 @@ export async function saveProcessedDocumentsSupabase(supabase, documents) {
     chunk_count: document.chunks.length,
   }));
 
-  const chunkRows = remoteDocuments.flatMap((document) =>
+  const chunkRows = syncedDocuments.flatMap((document) =>
     document.chunks.map((chunk) => ({
       id: chunk.id,
       document_id: document.id,
@@ -71,5 +101,5 @@ export async function saveProcessedDocumentsSupabase(supabase, documents) {
   const chunkResult = await supabase.from("study_document_chunks").upsert(chunkRows);
   if (chunkResult.error) return { saved: false, error: chunkResult.error };
 
-  return { saved: true, error: null };
+  return { saved: true, error: null, documents: syncedDocuments };
 }
