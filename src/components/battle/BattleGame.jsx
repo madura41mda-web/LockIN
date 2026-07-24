@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { supabase } from "../../supabaseClient";
 import { submitAnswer, advanceQuestion } from "./battleApi";
 
-export default function BattleGame({ room, myPlayer, opponent, userId }) {
+export default function BattleGame({ room, myPlayer, opponent, userId, onRoomSnapshot }) {
   const [question, setQuestion] = useState(null);
   const [phase, setPhase] = useState("question"); // question | reveal
   const [selected, setSelected] = useState(null);
@@ -17,6 +17,15 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
   const selectedRef = useRef(null);
 
   const questionIndex = room.current_question_index;
+  const isHost = room.host_id === userId;
+  const authoritativePhase = room.round_phase || phase;
+  const bothAnswersPersisted = Boolean(myResult) && opponentAnswered;
+  const shouldCloseQuestion = timeLeft <= 0 || bothAnswersPersisted;
+  const roundEndsAt = room.round_ends_at
+    ? new Date(room.round_ends_at).getTime()
+    : room.current_question_started_at
+      ? new Date(room.current_question_started_at).getTime() + room.time_per_question * 1000
+      : null;
 
   function playBattleSound(type) {
     try {
@@ -77,6 +86,10 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
   }, [myResult]);
 
   useEffect(() => {
+    if (room.round_phase) setPhase(room.round_phase);
+  }, [room.round_phase, questionIndex]);
+
+  useEffect(() => {
     let active = true;
     setSelected(null);
     setSubmitted(false);
@@ -89,43 +102,77 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
     submittedRef.current = false;
 
     async function loadQuestion() {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("battle_questions")
         .select("*")
         .eq("room_id", room.id)
         .eq("question_index", questionIndex)
         .single();
+      if (error) {
+        console.error("Battle question load failed", {
+          roomId: room.id,
+          questionIndex,
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        });
+      }
       if (active) setQuestion(data);
     }
+    async function loadAnswers() {
+      const { data, error } = await supabase
+        .from("battle_answers")
+        .select("*")
+        .eq("room_id", room.id)
+        .eq("question_index", questionIndex);
+      if (error) {
+        console.error("Battle answers load failed", {
+          roomId: room.id,
+          questionIndex,
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        });
+        return;
+      }
+      if (!active) return;
+      const answers = data || [];
+      const myAnswer = answers.find((answer) => answer.player_id === myPlayer?.id);
+      const opponentAnswer = answers.find((answer) => answer.player_id === opponent?.id);
+      if (myAnswer) {
+        setMyResult(myAnswer);
+        setSubmitted(true);
+        submittedRef.current = true;
+        const selectedAnswer = Number(myAnswer.selected_answer);
+        if (Number.isInteger(selectedAnswer) && selectedAnswer >= 0) setSelected(selectedAnswer);
+      }
+      if (opponentAnswer) setOpponentAnswered(true);
+    }
     loadQuestion();
+    loadAnswers();
 
     return () => {
       active = false;
     };
-  }, [room.id, questionIndex]);
+  }, [room.id, questionIndex, myPlayer?.id, opponent?.id]);
 
   useEffect(() => {
-    if (!room.current_question_started_at) return;
-    const startedAt = new Date(room.current_question_started_at).getTime();
+    if (!roundEndsAt) return;
 
     function tick() {
-      const elapsed = (Date.now() - startedAt) / 1000;
-      const remaining = Math.max(0, room.time_per_question - elapsed);
+      const remaining = Math.max(0, (roundEndsAt - Date.now()) / 1000);
       setTimeLeft(remaining);
       if (remaining <= 0) {
-        // Timer ran out: auto-submit whatever (if anything) was selected so the
-        // server always has an answer row for this question, then reveal.
-        if (!submittedRef.current) {
-          doSubmit(selectedRef.current);
-        }
-        setPhase((p) => (p === "question" ? "reveal" : p));
+        if (!room.round_phase) setPhase((p) => (p === "question" ? "reveal" : p));
       }
     }
 
     tick();
     const interval = setInterval(tick, 250);
     return () => clearInterval(interval);
-  }, [room.current_question_started_at, room.time_per_question]);
+  }, [roundEndsAt, room.round_phase]);
 
   useEffect(() => {
     if (!opponent) return;
@@ -136,36 +183,146 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
         { event: "INSERT", schema: "public", table: "battle_answers", filter: `room_id=eq.${room.id}` },
         (payload) => {
           if (payload.new.question_index !== questionIndex) return;
+          if (payload.new.player_id === myPlayer?.id) {
+            setMyResult(payload.new);
+            setSubmitted(true);
+            submittedRef.current = true;
+          }
           if (payload.new.player_id === opponent.id) setOpponentAnswered(true);
         }
       )
       .subscribe();
     return () => supabase.removeChannel(channel);
-  }, [room.id, questionIndex, opponent]);
+  }, [room.id, questionIndex, myPlayer?.id, opponent]);
 
   useEffect(() => {
-    if (submitted && opponentAnswered) setPhase("reveal");
-  }, [submitted, opponentAnswered]);
+    if (bothAnswersPersisted && !room.round_phase) setPhase("reveal");
+  }, [bothAnswersPersisted, room.round_phase]);
 
   useEffect(() => {
-    if (phase !== "reveal" || advancingRef.current) return;
-    advancingRef.current = true;
-
-    // advance_question is optimistic-concurrency: only the first caller for a
-    // given expectedIndex actually moves the room forward, the other client's
-    // call is a harmless no-op. If it fails for a real reason (network blip,
-    // RLS, etc.) we retry a couple of times and surface an error instead of
-    // leaving both players silently stuck on the same question.
+    if (!isHost || authoritativePhase !== "question") return;
+    if (!shouldCloseQuestion) return;
+    const advanceKey = `${room.id}:${questionIndex}:question`;
+    if (advancingRef.current === advanceKey) return;
+    advancingRef.current = advanceKey;
     let cancelled = false;
-    async function tryAdvance(attempt) {
+    let retryTimer = null;
+
+    function scheduleRetry(attempt) {
+      if (cancelled) return;
+      if (advancingRef.current === advanceKey) advancingRef.current = false;
+      retryTimer = setTimeout(() => {
+        if (cancelled) return;
+        if (advancingRef.current && advancingRef.current !== advanceKey) return;
+        advancingRef.current = advanceKey;
+        closeQuestion(attempt);
+      }, 1000);
+    }
+
+    async function closeQuestion(attempt) {
       try {
-        await advanceQuestion(room.id, questionIndex);
+        const result = await advanceQuestion(room.id, questionIndex, {
+          status: room.status,
+          phase: authoritativePhase,
+          userId,
+          hostId: room.host_id,
+        });
+        if (result?.roomSnapshot) onRoomSnapshot?.(result.roomSnapshot);
+        console.info("Battle close-question attempt", {
+          roomId: room.id,
+          questionIndex,
+          attempt,
+          advanced: result?.advanced,
+          roomSnapshot: result?.roomSnapshot,
+          shouldCloseQuestion,
+        });
+        if (!result?.advanced && !cancelled) {
+          const snapshotStillOnQuestion =
+            result?.roomSnapshot?.status === "in_progress" &&
+            result.roomSnapshot.current_question_index === questionIndex &&
+            result.roomSnapshot.round_phase === "question";
+          if (snapshotStillOnQuestion) {
+            scheduleRetry(attempt + 1);
+          } else if (advancingRef.current === advanceKey) {
+            advancingRef.current = false;
+          }
+        }
       } catch (err) {
-        console.error("advanceQuestion failed", err);
         if (cancelled) return;
         if (attempt < 3) {
-          setTimeout(() => tryAdvance(attempt + 1), 1000);
+          scheduleRetry(attempt + 1);
         } else {
+          if (advancingRef.current === advanceKey) advancingRef.current = false;
+          setBattleError(
+            "Having trouble syncing to the next question. If this doesn't resolve in a few seconds, try leaving and rejoining the battle."
+          );
+        }
+      }
+    }
+    closeQuestion(0);
+    return () => {
+      cancelled = true;
+      clearTimeout(retryTimer);
+      if (advancingRef.current === advanceKey) advancingRef.current = false;
+    };
+  }, [isHost, authoritativePhase, shouldCloseQuestion, room.id, room.status, room.host_id, questionIndex, userId, onRoomSnapshot]);
+
+  useEffect(() => {
+    if (!isHost || authoritativePhase !== "reveal") return;
+    const revealEndsAt = room.reveal_ends_at ? new Date(room.reveal_ends_at).getTime() : Date.now() + 3000;
+    const delay = Math.max(0, revealEndsAt - Date.now());
+    const advanceKey = `${room.id}:${questionIndex}:reveal`;
+    if (advancingRef.current === advanceKey) return;
+    advancingRef.current = advanceKey;
+
+    let cancelled = false;
+    let retryTimer = null;
+
+    function scheduleRetry(attempt) {
+      if (cancelled) return;
+      if (advancingRef.current === advanceKey) advancingRef.current = false;
+      retryTimer = setTimeout(() => {
+        if (cancelled) return;
+        if (advancingRef.current && advancingRef.current !== advanceKey) return;
+        advancingRef.current = advanceKey;
+        advanceAfterReveal(attempt);
+      }, 1000);
+    }
+
+    async function advanceAfterReveal(attempt) {
+      try {
+        const result = await advanceQuestion(room.id, questionIndex, {
+          status: room.status,
+          phase: authoritativePhase,
+          userId,
+          hostId: room.host_id,
+        });
+        if (result?.roomSnapshot) onRoomSnapshot?.(result.roomSnapshot);
+        console.info("Battle reveal advance attempt", {
+          roomId: room.id,
+          questionIndex,
+          attempt,
+          advanced: result?.advanced,
+          roomSnapshot: result?.roomSnapshot,
+          revealEndsAt: room.reveal_ends_at,
+        });
+        if (!result?.advanced && !cancelled) {
+          const snapshotStillOnReveal =
+            result?.roomSnapshot?.status === "in_progress" &&
+            result.roomSnapshot.current_question_index === questionIndex &&
+            result.roomSnapshot.round_phase === "reveal";
+          if (snapshotStillOnReveal) {
+            scheduleRetry(attempt + 1);
+          } else if (advancingRef.current === advanceKey) {
+            advancingRef.current = false;
+          }
+        }
+      } catch (err) {
+        if (cancelled) return;
+        if (attempt < 3) {
+          scheduleRetry(attempt + 1);
+        } else {
+          if (advancingRef.current === advanceKey) advancingRef.current = false;
           setBattleError(
             "Having trouble syncing to the next question. If this doesn't resolve in a few seconds, try leaving and rejoining the battle."
           );
@@ -173,20 +330,23 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
       }
     }
 
-    const t = setTimeout(() => tryAdvance(0), 4000);
+    const t = setTimeout(() => advanceAfterReveal(0), delay);
     return () => {
       cancelled = true;
       clearTimeout(t);
+      clearTimeout(retryTimer);
+      if (advancingRef.current === advanceKey) advancingRef.current = false;
     };
-  }, [phase, room.id, questionIndex]);
+  }, [isHost, authoritativePhase, room.id, room.status, room.host_id, room.reveal_ends_at, questionIndex, userId, onRoomSnapshot]);
 
   function selectOption(optionIndex) {
-    if (submitted || phase !== "question") return;
+    if (submitted || authoritativePhase !== "question") return;
     playBattleSound("click");
     setSelected(optionIndex);
   }
 
   async function doSubmit(optionIndex) {
+    if (authoritativePhase !== "question") return;
     if (submittingRef.current || submittedRef.current) return;
     submittingRef.current = true;
     playBattleSound("submit");
@@ -217,6 +377,7 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
   const myScore = myPlayer?.score ?? 0;
   const opponentScore = opponent?.score ?? 0;
   const progressPct = (questionIndex / room.question_count) * 100;
+  const noAnswerSubmitted = myResult?.selected_answer === "-1";
 
   return (
     <main className="feature-page">
@@ -253,7 +414,7 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
         <div className="quiz-options">
           {(question.options || []).map((opt, i) => {
             let cls = "quiz-option";
-            if (phase === "reveal") {
+            if (authoritativePhase === "reveal") {
               if (i === correctIndex) cls += " quiz-option-correct";
               else if (i === selected) cls += " quiz-option-wrong";
             } else if (i === selected) {
@@ -264,7 +425,7 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
                 key={i}
                 type="button"
                 className={cls}
-                disabled={submitted || phase === "reveal"}
+                disabled={submitted || authoritativePhase === "reveal"}
                 onClick={() => selectOption(i)}
               >
                 {opt}
@@ -273,7 +434,7 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
           })}
         </div>
 
-        {phase === "question" && (
+        {authoritativePhase === "question" && (
           <button
             type="button"
             className="generate-btn"
@@ -285,17 +446,19 @@ export default function BattleGame({ room, myPlayer, opponent, userId }) {
           </button>
         )}
 
-        {phase === "question" && opponentAnswered && !submitted && (
+        {authoritativePhase === "question" && opponentAnswered && !submitted && (
           <p className="mono text-center" style={{ color: "var(--accent)" }}>
             Opponent has answered...
           </p>
         )}
 
-        {phase === "reveal" && (
+        {authoritativePhase === "reveal" && (
           <div className="quiz-feedback">
             <p className={myResult?.is_correct ? "quiz-feedback-correct" : "quiz-feedback-wrong"}>
               {myResult
-                ? myResult.is_correct
+                ? noAnswerSubmitted
+                  ? "No answer submitted"
+                  : myResult.is_correct
                   ? `Correct! +${myResult.points_earned}`
                   : "Incorrect"
                 : "No answer submitted"}
