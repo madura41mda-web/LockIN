@@ -1,7 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
-import { Check, Copy, LogOut, Pause, Play, RotateCcw, Send, Users } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  Check,
+  Copy,
+  LogOut,
+  Mic,
+  MicOff,
+  Pause,
+  Play,
+  Radio,
+  RotateCcw,
+  Send,
+  Users,
+} from "lucide-react";
 import Avatar from "./Avatar";
-import { useStudyLobby } from "../hooks/useStudyLobby";
 
 function formatTime(secs) {
   const safeSecs = Math.max(0, Math.round(secs || 0));
@@ -17,24 +28,18 @@ function timerRemaining(timer) {
   return timer.remainingSeconds || timer.durationSeconds || 25 * 60;
 }
 
-export default function StudyLobby({ session, profile, currentActiveMode, flowIsRunning, onClose }) {
+export default function StudyLobby({ session, lobby, onClose }) {
   const [roomCodeInput, setRoomCodeInput] = useState("");
   const [copied, setCopied] = useState(false);
   const [messageDraft, setMessageDraft] = useState("");
+  const [liveMessageDraft, setLiveMessageDraft] = useState("");
   const [selectedDuration, setSelectedDuration] = useState(25 * 60);
   const [secondsLeft, setSecondsLeft] = useState(25 * 60);
+  const liveChatScrollRef = useRef(null);
+  const liveChatNearBottomRef = useRef(true);
 
-  const currentAction = useMemo(() => {
-    if (flowIsRunning) return "Focusing";
-    if (currentActiveMode === "quiz") return "Taking Quiz";
-    if (currentActiveMode === "battle") return "Gladiating";
-    if (currentActiveMode === "flashcards") return "Reviewing Cards";
-    if (currentActiveMode === "revision") return "Revising Notes";
-    return "Idle";
-  }, [currentActiveMode, flowIsRunning]);
-
-  const lobby = useStudyLobby({ session, profile, currentAction });
   const roomCode = lobby.room?.code || "";
+  const communication = lobby.communication;
 
   useEffect(() => {
     setSelectedDuration(lobby.timer.durationSeconds || 25 * 60);
@@ -48,6 +53,12 @@ export default function StudyLobby({ session, profile, currentActiveMode, flowIs
     const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
   }, [lobby.timer]);
+
+  useEffect(() => {
+    const container = liveChatScrollRef.current;
+    if (!container || !liveChatNearBottomRef.current) return;
+    container.scrollTop = container.scrollHeight;
+  }, [communication.chatMessages]);
 
   async function copyToClipboard() {
     await navigator.clipboard.writeText(roomCode);
@@ -66,6 +77,20 @@ export default function StudyLobby({ session, profile, currentActiveMode, flowIs
     if (!body) return;
     setMessageDraft("");
     await lobby.postMessage(body);
+  }
+
+  async function handleSendLiveMessage(event) {
+    event.preventDefault();
+    const body = liveMessageDraft.trim();
+    if (!body) return;
+    const sent = await communication.sendChatMessage(body);
+    if (sent) setLiveMessageDraft("");
+  }
+
+  function handleLiveChatScroll(event) {
+    const container = event.currentTarget;
+    liveChatNearBottomRef.current =
+      container.scrollHeight - container.scrollTop - container.clientHeight < 80;
   }
 
   function startTimer(durationSeconds = selectedDuration) {
@@ -179,6 +204,9 @@ export default function StudyLobby({ session, profile, currentActiveMode, flowIs
           <span className="setup-label flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> {lobby.status === "reconnecting" ? "reconnecting" : "study_room_connected"}
           </span>
+          <span className="text-[10px] text-gray-500 font-mono">
+            voice_{communication.connectionState} · {communication.participantCount} voice participants
+          </span>
           <h3 className="feature-page-title flex items-center gap-3">
             Room Code: <span className="font-mono text-orange-500">{roomCode}</span>
             <button type="button" onClick={copyToClipboard} className="secondary p-1 rounded" title="Copy room code">
@@ -186,12 +214,40 @@ export default function StudyLobby({ session, profile, currentActiveMode, flowIs
             </button>
           </h3>
         </div>
-        <button type="button" onClick={leaveRoom} className="secondary text-xs flex items-center gap-1.5 border-red-500/20 text-red-500 hover:bg-red-500/5">
-          <LogOut size={14} /> Leave Room
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={communication.toggleMicrophone}
+            disabled={
+              communication.connectionState !== "connected" ||
+              communication.microphoneBusy
+            }
+            className={`secondary text-xs flex items-center gap-1.5 ${
+              communication.microphoneEnabled
+                ? "border-emerald-500/30 text-emerald-500"
+                : ""
+            }`}
+            aria-pressed={communication.microphoneEnabled}
+          >
+            {communication.microphoneEnabled ? <Mic size={14} /> : <MicOff size={14} />}
+            {communication.microphoneBusy
+              ? "Starting..."
+              : communication.microphoneEnabled
+                ? "Mute"
+                : communication.audioPermissionState === "granted"
+                  ? "Unmute"
+                  : "Enable Mic"}
+          </button>
+          <button type="button" onClick={leaveRoom} className="secondary text-xs flex items-center gap-1.5 border-red-500/20 text-red-500 hover:bg-red-500/5">
+            <LogOut size={14} /> Leave Room
+          </button>
+        </div>
       </header>
 
       {lobby.error && <p className="upload-error mono mb-4">{lobby.error}</p>}
+      {communication.audioError && (
+        <p className="upload-error mono mb-4">{communication.audioError}</p>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="md:col-span-2 flex flex-col gap-6">
@@ -259,7 +315,7 @@ export default function StudyLobby({ session, profile, currentActiveMode, flowIs
 
           <section className="p-5 rounded-xl border border-gray-250 dark:border-white/10 bg-white dark:bg-[#12161d] flex flex-col gap-4">
             <div className="flex items-center justify-between">
-              <span className="setup-label">lobby_chat</span>
+              <span className="setup-label">saved_lobby_chat</span>
               <span className="text-[10px] font-mono text-gray-500">{lobby.messages.length} messages</span>
             </div>
             <div className="flex flex-col gap-3 max-h-[320px] overflow-y-auto pr-1">
@@ -292,6 +348,77 @@ export default function StudyLobby({ session, profile, currentActiveMode, flowIs
               </button>
             </form>
           </section>
+
+          <section className="p-5 rounded-xl border border-orange-500/20 bg-white dark:bg-[#12161d] flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+              <span className="setup-label flex items-center gap-1.5">
+                <Radio size={13} /> live_session_chat
+              </span>
+              <span className="text-[10px] font-mono text-gray-500">
+                {communication.chatMessages.length} session messages
+              </span>
+            </div>
+            <p className="text-[10px] text-gray-500">
+              Live messages remain only for this active lobby session. Saved lobby chat above is unchanged.
+            </p>
+            <div
+              ref={liveChatScrollRef}
+              onScroll={handleLiveChatScroll}
+              className="flex flex-col gap-3 max-h-[320px] overflow-y-auto pr-1"
+            >
+              {communication.chatMessages.length === 0 ? (
+                <p className="text-xs text-gray-500 mono">No live session messages yet.</p>
+              ) : (
+                communication.chatMessages.map((message) => (
+                  <article
+                    key={message.id}
+                    className={`p-3 rounded-lg border ${
+                      message.isLocal
+                        ? "border-orange-500/20 bg-orange-500/[0.03]"
+                        : "border-gray-250 dark:border-white/5 bg-[#171c25]/30"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-xs font-bold text-slate-900 dark:text-white">
+                        {message.senderName || "Student"}
+                      </span>
+                      <time className="text-[10px] text-gray-500 font-mono">
+                        {new Date(message.timestamp).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </time>
+                    </div>
+                    <p className="text-sm text-slate-700 dark:text-slate-300 mt-1 whitespace-pre-wrap">
+                      {message.body}
+                    </p>
+                  </article>
+                ))
+              )}
+            </div>
+            <form onSubmit={handleSendLiveMessage} className="flex gap-2">
+              <input
+                type="text"
+                value={liveMessageDraft}
+                onChange={(event) => setLiveMessageDraft(event.target.value)}
+                placeholder="Send a live session message..."
+                maxLength={communication.maxChatMessageLength}
+                disabled={communication.connectionState !== "connected"}
+                className="flex-1 rounded-lg border border-gray-300 dark:border-white/10 bg-white dark:bg-[#12161d] text-slate-900 dark:text-white px-3 py-2.5 text-sm outline-none focus:border-orange-500"
+              />
+              <button
+                type="submit"
+                className="secondary px-4"
+                aria-label="Send live session message"
+                disabled={communication.connectionState !== "connected"}
+              >
+                <Send size={16} />
+              </button>
+            </form>
+            {communication.chatError && (
+              <p className="upload-error mono">{communication.chatError}</p>
+            )}
+          </section>
         </div>
 
         <div className="flex flex-col gap-6">
@@ -309,6 +436,9 @@ export default function StudyLobby({ session, profile, currentActiveMode, flowIs
               {lobby.participants.map((member) => {
                 const isSelf = member.user_id === session.user.id;
                 const isOnline = member.is_online;
+                const voiceParticipant = communication.participants.find(
+                  (participant) => participant.identity === member.user_id
+                );
 
                 return (
                   <div
@@ -318,7 +448,13 @@ export default function StudyLobby({ session, profile, currentActiveMode, flowIs
                     } ${isOnline ? "" : "opacity-60"}`}
                   >
                     <div className="flex items-center gap-2 min-w-0">
-                      <div className="relative">
+                      <div
+                        className={`relative rounded-full ${
+                          voiceParticipant?.isSpeaking
+                            ? "ring-2 ring-emerald-400 ring-offset-2 ring-offset-[#12161d]"
+                            : ""
+                        }`}
+                      >
                         <Avatar choice={member.avatar} size={32} />
                         <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#12161d] ${isOnline ? "bg-emerald-500" : "bg-gray-500"}`} />
                       </div>
@@ -335,9 +471,31 @@ export default function StudyLobby({ session, profile, currentActiveMode, flowIs
                         )}
                       </div>
                     </div>
-                    <span className="text-[10px] font-semibold font-mono px-2 py-0.5 rounded-full bg-gray-250 dark:bg-white/5 text-gray-500">
-                      {member.current_action || "Idle"}
-                    </span>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className="text-[10px] font-semibold font-mono px-2 py-0.5 rounded-full bg-gray-250 dark:bg-white/5 text-gray-500">
+                        {member.current_action || "Idle"}
+                      </span>
+                      <span
+                        className={`text-[9px] font-mono flex items-center gap-1 ${
+                          voiceParticipant?.isSpeaking
+                            ? "text-emerald-400"
+                            : "text-gray-500"
+                        }`}
+                      >
+                        {voiceParticipant?.microphoneEnabled ? (
+                          <Mic size={10} />
+                        ) : (
+                          <MicOff size={10} />
+                        )}
+                        {voiceParticipant?.isSpeaking
+                          ? "Speaking"
+                          : voiceParticipant?.microphoneEnabled
+                            ? "Mic on"
+                            : voiceParticipant
+                              ? "Muted"
+                              : "Voice offline"}
+                      </span>
+                    </div>
                   </div>
                 );
               })}

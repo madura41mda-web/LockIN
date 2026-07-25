@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../supabaseClient";
+import { useLobbyCommunication } from "./useLobbyCommunication";
 import {
   createLobbyRoom,
   findLobbyRoom,
@@ -39,6 +40,12 @@ export function useStudyLobby({ session, profile, currentAction }) {
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState("");
   const channelRef = useRef(null);
+  const previousUserIdRef = useRef(null);
+  const restoringRoomRef = useRef(false);
+  const communication = useLobbyCommunication({
+    session,
+    participantName: username,
+  });
 
   const isHost = Boolean(room && user && room.host_user_id === user.id);
   const isInRoom = Boolean(room);
@@ -84,13 +91,14 @@ export function useStudyLobby({ session, profile, currentAction }) {
       });
       await refreshState(nextRoom.id);
       persistRoom(nextRoom);
+      await communication.connect(nextRoom);
       setStatus("joined");
     } catch (err) {
       console.error("Failed to join lobby:", err);
       setError("Could not join that room. Check the code or try again.");
       setStatus("idle");
     }
-  }, [avatar, currentAction, customStatus, persistRoom, refreshState, user, username]);
+  }, [avatar, communication.connect, currentAction, customStatus, persistRoom, refreshState, user, username]);
 
   const createRoom = useCallback(async () => {
     if (!user) {
@@ -102,6 +110,10 @@ export function useStudyLobby({ session, profile, currentAction }) {
     setError("");
     try {
       const nextRoom = await createLobbyRoom({ userId: user.id });
+      const {
+        data: { session: sessionAtCreateTime },
+      } = await supabase.auth.getSession();
+      console.log("session at create time:", sessionAtCreateTime);
       await upsertParticipant({
         roomId: nextRoom.id,
         userId: user.id,
@@ -113,13 +125,14 @@ export function useStudyLobby({ session, profile, currentAction }) {
       });
       await refreshState(nextRoom.id);
       persistRoom(nextRoom);
+      await communication.connect(nextRoom);
       setStatus("joined");
     } catch (err) {
       console.error("Failed to create lobby:", err);
       setError("Could not create a room. Confirm the lobby migration is applied.");
       setStatus("idle");
     }
-  }, [avatar, currentAction, customStatus, persistRoom, refreshState, user, username]);
+  }, [avatar, communication.connect, currentAction, customStatus, persistRoom, refreshState, user, username]);
 
   const leaveRoom = useCallback(async () => {
     const leavingRoomId = room?.id;
@@ -130,13 +143,14 @@ export function useStudyLobby({ session, profile, currentAction }) {
     if (leavingRoomId && user) {
       await markParticipantOffline({ roomId: leavingRoomId, userId: user.id });
     }
+    await communication.disconnect();
     setRoom(null);
     setParticipants([]);
     setMessages([]);
     setTimer(mapTimer(null));
     clearPersistedRoom();
     setStatus("idle");
-  }, [clearPersistedRoom, room?.id, user]);
+  }, [clearPersistedRoom, communication.disconnect, room?.id, user]);
 
   const postMessage = useCallback(async (body) => {
     if (!room || !user) return;
@@ -170,17 +184,53 @@ export function useStudyLobby({ session, profile, currentAction }) {
   }, [isHost, room, user]);
 
   useEffect(() => {
-    if (!user || room) return;
+    if (!user || room || restoringRoomRef.current) return;
     const saved = localStorage.getItem(`${LOBBY_STORAGE_KEY}_${user.id}`);
     if (!saved) return;
     try {
       const parsed = JSON.parse(saved);
-      if (parsed?.code) joinRoom(parsed.code);
+      if (parsed?.code) {
+        restoringRoomRef.current = true;
+        Promise.resolve(joinRoom(parsed.code)).finally(() => {
+          restoringRoomRef.current = false;
+        });
+      }
     } catch (err) {
       console.error("Failed to restore lobby:", err);
       clearPersistedRoom();
     }
   }, [clearPersistedRoom, joinRoom, room, user]);
+
+  useEffect(() => {
+    if (user) {
+      previousUserIdRef.current = user.id;
+      return;
+    }
+
+    const previousUserId = previousUserIdRef.current;
+    if (!previousUserId) return;
+    previousUserIdRef.current = null;
+    const activeRoomId = room?.id;
+
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current);
+      channelRef.current = null;
+    }
+    if (activeRoomId) {
+      markParticipantOffline({ roomId: activeRoomId, userId: previousUserId }).catch((err) =>
+        console.error("Failed to mark lobby participant offline on logout:", err)
+      );
+    }
+    localStorage.removeItem(`${LOBBY_STORAGE_KEY}_${previousUserId}`);
+    communication.disconnect().catch((err) =>
+      console.error("Failed to disconnect LiveKit on logout:", err)
+    );
+    setRoom(null);
+    setParticipants([]);
+    setMessages([]);
+    setTimer(mapTimer(null));
+    setStatus("idle");
+  }, [communication.disconnect, room?.id, user]);
 
   useEffect(() => {
     if (!room || !user) return;
@@ -194,10 +244,10 @@ export function useStudyLobby({ session, profile, currentAction }) {
       currentAction,
       isHost,
     }).catch((err) => console.error("Failed to update participant state:", err));
-  }, [avatar, currentAction, customStatus, isHost, room, user, username]);
+  }, [avatar, currentAction, customStatus, isHost, room?.id, user, username]);
 
   useEffect(() => {
-    if (!room) return;
+    if (!room || !user) return;
     const roomId = room.id;
 
     if (channelRef.current) {
@@ -245,7 +295,7 @@ export function useStudyLobby({ session, profile, currentAction }) {
       supabase.removeChannel(channel);
       if (channelRef.current === channel) channelRef.current = null;
     };
-  }, [leaveRoom, refreshState, room?.id]);
+  }, [leaveRoom, refreshState, room?.id, user]);
 
   useEffect(() => {
     if (!user) return;
@@ -260,6 +310,8 @@ export function useStudyLobby({ session, profile, currentAction }) {
     messages,
     timer,
     status,
+    liveKitStatus: communication.connectionState,
+    communication,
     error,
     isHost,
     isInRoom,
@@ -277,6 +329,7 @@ export function useStudyLobby({ session, profile, currentAction }) {
     joinRoom,
     leaveRoom,
     messages,
+    communication,
     participants,
     postMessage,
     room,

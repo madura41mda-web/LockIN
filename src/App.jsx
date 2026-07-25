@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BookOpen, Brain, Clock, Swords, Timer, Users } from "lucide-react";
 import Navbar from "./components/Navbar";
 import FileUpload from "./components/FileUpload";
@@ -14,6 +14,7 @@ import ProfileDashboard from "./components/ProfileDashboard";
 import BattleMode from "./components/battle/BattleMode";
 import FlowState, { TIMER_MODES } from "./components/FlowState";
 import StudyLobby from "./components/StudyLobby";
+import LobbyAudioRenderer from "./components/lobby/LobbyAudioRenderer";
 import { parseModules } from "./utils/parseModules";
 import {
   createGenerationBatches,
@@ -25,6 +26,7 @@ import {
 import { optionalUuid, persistedDocumentId } from "./utils/idValidation";
 import { useFlowAmbience, loadAmbiencePrefs } from "./utils/useFlowAmbience";
 import { supabase } from "./supabaseClient";
+import { useStudyLobby } from "./hooks/useStudyLobby";
 
 const FEATURES = [
   {
@@ -183,6 +185,21 @@ export default function App() {
   );
   const [flowIsMuted, setFlowIsMuted] = useState(Boolean(savedAmbiencePrefs.isMuted));
   const [flowResetSignal, setFlowResetSignal] = useState(0);
+
+  const lobbyCurrentAction = useMemo(() => {
+    if (flowIsRunning) return "Focusing";
+    if (activeMode === "quiz") return "Taking Quiz";
+    if (activeMode === "battle") return "Gladiating";
+    if (activeMode === "flashcards") return "Reviewing Cards";
+    if (activeMode === "revision") return "Revising Notes";
+    return "Idle";
+  }, [activeMode, flowIsRunning]);
+
+  const studyLobby = useStudyLobby({
+    session,
+    profile,
+    currentAction: lobbyCurrentAction,
+  });
 
   const { isLoading: flowAmbienceLoading, error: flowAmbienceError } = useFlowAmbience({
     activeSound: flowActiveSound,
@@ -1222,6 +1239,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen p-6">
+      <LobbyAudioRenderer
+        tracks={studyLobby.communication.remoteAudioTracks}
+        onPlaybackError={studyLobby.communication.setAudioError}
+      />
       <Navbar
         userEmail={session?.user?.email}
         onLoginClick={() => setAuthModalOpen(true)}
@@ -1314,9 +1335,7 @@ export default function App() {
       ) : activeMode === "lobby" ? (
         <StudyLobby
           session={session}
-          profile={profile}
-          currentActiveMode={activeMode}
-          flowIsRunning={flowIsRunning}
+          lobby={studyLobby}
           onClose={() => switchMode("flashcards")}
         />
       ) : (
