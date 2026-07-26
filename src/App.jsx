@@ -9,6 +9,7 @@ import Quiz from "./components/Quiz";
 import QuizSummary from "./components/QuizSummary";
 import QuickRevision from "./components/QuickRevision";
 import Auth from "./components/Auth";
+import Landing from "./components/Landing";
 import MyLibrary from "./components/MyLibrary";
 import ProfileDashboard from "./components/ProfileDashboard";
 import BattleMode from "./components/battle/BattleMode";
@@ -133,6 +134,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [exploreAnon, setExploreAnon] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
   const [saveStatus, setSaveStatus] = useState("");
   const [profile, setProfile] = useState(null);
@@ -1241,6 +1243,32 @@ export default function App() {
 
   if (authLoading) {
     return <div className="min-h-screen p-6" />;
+  }
+
+  if (!session && !exploreAnon) {
+    return (
+      <>
+        <Landing
+          onLogin={() => setAuthModalOpen(true)}
+          onExplore={() => setExploreAnon(true)}
+        />
+        {authModalOpen && (
+          <div className="auth-modal-overlay" onClick={() => setAuthModalOpen(false)}>
+            <div className="auth-modal-box" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                className="auth-modal-close"
+                onClick={() => setAuthModalOpen(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+              <Auth />
+            </div>
+          </div>
+        )}
+      </>
+    );
   }
 
   return (
