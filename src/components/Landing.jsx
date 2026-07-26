@@ -1,4 +1,6 @@
 import { BookOpen, Brain, Clock, Swords, Timer, ArrowRight, Sparkles } from "lucide-react";
+import BrandLock from "./BrandLock";
+import FocusVisual from "./FocusVisual";
 
 const LANDING_FEATURES = [
   {
@@ -39,7 +41,7 @@ export default function Landing({ onLogin, onExplore }) {
     <div className="landing">
       <header className="landing-nav">
         <div className="landing-brand">
-          <span className="landing-brand-mark" aria-hidden="true">L</span>
+          <BrandLock size={38} />
           <span className="landing-brand-name">LockIN</span>
         </div>
         <div className="landing-nav-actions">
@@ -91,11 +93,7 @@ export default function Landing({ onLogin, onExplore }) {
             </dl>
           </div>
           <div className="landing-hero-visual">
-            <img
-              src="/landing-hero.png"
-              alt="A calm study desk with a notebook, laptop and index cards"
-              className="landing-hero-img"
-            />
+            <FocusVisual />
           </div>
         </section>
 
