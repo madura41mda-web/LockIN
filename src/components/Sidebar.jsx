@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Lock, LockOpen, Moon, Sun, X } from "lucide-react";
+import { Moon, Sun, X } from "lucide-react";
 import ProfileMenu from "./ProfileMenu";
+import SidebarLogo from "./SidebarLogo";
 
 function getInitialTheme() {
   const savedTheme = localStorage.getItem("lockin-theme");
@@ -37,8 +38,7 @@ export default function Sidebar({
     <aside className={`app-sidebar ${open ? "is-open" : ""}`} aria-label="Primary navigation">
       <div className="side-brand">
         <div className="brand-icon" tabIndex={0} aria-label="Focus lock">
-          <Lock className="brand-lock brand-lock-closed w-6 h-6" />
-          <LockOpen className="brand-lock brand-lock-open w-6 h-6" />
+          <SidebarLogo size={24} />
         </div>
         <div className="min-w-0">
           <h1 className="brand-title">LockIN</h1>
