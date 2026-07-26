@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Brain, Clock, Swords, Timer } from "lucide-react";
-import Navbar from "./components/Navbar";
+import { BookOpen, Brain, Clock, Swords, Timer, Menu, Library, User } from "lucide-react";
+import Sidebar from "./components/Sidebar";
 import FileUpload from "./components/FileUpload";
 import ModuleSelector from "./components/ModuleSelector";
 import Flashcards from "./components/Flashcards";
@@ -69,6 +69,13 @@ const FEATURES = [
 ];
 
 const FEATURE_IDS = new Set(FEATURES.map((feature) => feature.id));
+
+// Sidebar navigation: feature tools plus the library and profile views.
+const NAV_ITEMS = [
+  ...FEATURES.map((feature) => ({ key: feature.id, label: feature.label, icon: feature.icon })),
+  { key: "library", label: "My Library", icon: Library },
+  { key: "profile", label: "Profile", icon: User },
+];
 const MAX_GENERATE_REQUEST_CHARS = 12000;
 const MAX_GENERATE_BATCH_RETRIES = 3;
 const MAX_QUIZ_BATCH_ATTEMPTS = 6;
@@ -152,6 +159,7 @@ export default function App() {
   const [processedDocuments, setProcessedDocuments] = useState([]);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingBattleCode, setPendingBattleCode] = useState(null);
 
   // Flow State background timer states
@@ -520,6 +528,37 @@ export default function App() {
       switchMode(id);
     }
   }
+
+  function openLibrary() {
+    setLibraryOpen(true);
+    setProfileOpen(false);
+  }
+
+  function openProfile() {
+    setProfileOpen(true);
+    setLibraryOpen(false);
+  }
+
+  // Unified handler for the sidebar navigation list.
+  function handleNavSelect(key) {
+    setSidebarOpen(false);
+    if (key === "library") {
+      requireLogin(openLibrary);
+      return;
+    }
+    if (key === "profile") {
+      requireLogin(openProfile);
+      return;
+    }
+    // Feature views: always leave the library/profile overlays first, then
+    // switch (switchMode short-circuits when the mode is unchanged).
+    setLibraryOpen(false);
+    setProfileOpen(false);
+    handleFeatureClick(key);
+  }
+
+  // Which sidebar entry should read as active.
+  const activeNavKey = libraryOpen ? "library" : profileOpen ? "profile" : activeMode;
 
   function getSelectedText() {
     return selectedModule === "__ALL__" ? noteText : modules[selectedModule] || noteText;
@@ -1205,65 +1244,60 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen p-6">
-      <Navbar
+    <div className="app-shell">
+      {sidebarOpen && (
+        <div
+          className="sidebar-backdrop"
+          onClick={() => setSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      <Sidebar
+        navItems={NAV_ITEMS}
+        activeKey={activeNavKey}
+        onSelect={handleNavSelect}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
         userEmail={session?.user?.email}
-        onLoginClick={() => setAuthModalOpen(true)}
         username={profile?.username}
         onUsernameChange={(u) => handleProfileUpdate({ username: u })}
-        onLibraryClick={() => { setLibraryOpen(true); setProfileOpen(false); }}
-        onProfileClick={() => { setProfileOpen(true); setLibraryOpen(false); }}
+        onProfileClick={openProfile}
+        onLoginClick={() => setAuthModalOpen(true)}
         profile={profile}
       />
 
-      {authModalOpen && (
-        <div className="auth-modal-overlay" onClick={() => setAuthModalOpen(false)}>
-          <div className="auth-modal-box" onClick={(e) => e.stopPropagation()}>
-            <button
-              type="button"
-              className="auth-modal-close"
-              onClick={() => setAuthModalOpen(false)}
-              aria-label="Close"
-            >
-              ✕
-            </button>
-            <Auth />
+      <div className="app-main">
+        <header className="mobile-topbar">
+          <button
+            type="button"
+            className="mobile-menu-btn"
+            onClick={() => setSidebarOpen(true)}
+            aria-label="Open navigation"
+          >
+            <Menu size={20} />
+          </button>
+          <span className="brand-title">LockIN</span>
+        </header>
+
+        {authModalOpen && (
+          <div className="auth-modal-overlay" onClick={() => setAuthModalOpen(false)}>
+            <div className="auth-modal-box" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                className="auth-modal-close"
+                onClick={() => setAuthModalOpen(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+              <Auth />
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      <div className="mt-10">
-        <h2 className="hero-title">Focus. Learn. Ace.</h2>
-        <p className="hero-sub mt-3">turn study material into your ai study coach</p>
-      </div>
-
-      <nav className="feature-nav" aria-label="Study tools">
-        {FEATURES.map((feature) => {
-          const FeatureIcon = feature.icon;
-          const isActive = activeMode === feature.id;
-
-          return (
-            <button
-              key={feature.id}
-              type="button"
-              data-feature={feature.id}
-              className={`feature-tab ${isActive ? "feature-tab-active" : ""}`}
-              onClick={() => handleFeatureClick(feature.id)}
-              aria-current={isActive ? "page" : undefined}
-            >
-              <span className="feature-tab-icon">
-                <FeatureIcon size={21} />
-              </span>
-              <span className="feature-tab-copy">
-                <span className="feature-tab-label">{feature.label}</span>
-                <span className="feature-tab-description">{feature.description}</span>
-              </span>
-            </button>
-          );
-        })}
-      </nav>
-
-      {libraryOpen ? (
+        <div className="app-main-inner">
+          {libraryOpen ? (
         <MyLibrary
           session={session}
           onClose={() => setLibraryOpen(false)}
@@ -1414,7 +1448,9 @@ export default function App() {
             </>
           )}
         </main>
-      )}
+          )}
+        </div>
+      </div>
     </div>
   );
 }
