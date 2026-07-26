@@ -42,7 +42,9 @@ export default function Sidebar({
         </div>
         <div className="min-w-0">
           <h1 className="brand-title">LockIN</h1>
-          <p className="brand-sub">focus.exe --mode=study</p>
+          <p className="brand-sub">
+            focus.exe --mode=study<span className="term-cursor" aria-hidden="true">▋</span>
+          </p>
         </div>
         <button
           type="button"
@@ -102,7 +104,9 @@ export default function Sidebar({
           </div>
         ) : (
           <button type="button" onClick={onLoginClick} className="side-login">
-            Log in
+            <span className="side-login-prompt" aria-hidden="true">&gt;</span>
+            <span className="side-login-cmd">authenticate</span>
+            <span className="side-login-caret" aria-hidden="true">_</span>
           </button>
         )}
       </div>
