@@ -24,7 +24,7 @@ import {
 } from "./utils/documentProcessing";
 import { optionalUuid, persistedDocumentId } from "./utils/idValidation";
 import { useFlowAmbience, loadAmbiencePrefs } from "./utils/useFlowAmbience";
-import { supabase } from "./supabaseClient";
+import { supabase, isSupabaseConfigured } from "./supabaseClient";
 
 const FEATURES = [
   {
@@ -298,6 +298,11 @@ export default function App() {
 
   // Track login state, but never block the app on it
   useEffect(() => {
+    if (!isSupabaseConfigured) {
+      setAuthLoading(false);
+      return;
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setAuthLoading(false);
@@ -323,7 +328,7 @@ export default function App() {
 
   // Fetch (or create) the user's profile row once logged in
   useEffect(() => {
-    if (!session) {
+    if (!isSupabaseConfigured || !session) {
       setProfile(null);
       return;
     }
