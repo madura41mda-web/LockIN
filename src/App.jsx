@@ -24,6 +24,7 @@ import {
 import { optionalUuid, persistedDocumentId } from "./utils/idValidation";
 import { useFlowAmbience, loadAmbiencePrefs } from "./utils/useFlowAmbience";
 import { supabase } from "./supabaseClient";
+import Landing from "./components/Landing";
 
 const FEATURES = [
   {
@@ -129,10 +130,32 @@ function getModeFromHash() {
   return FEATURE_IDS.has(hashMode) ? hashMode : "flashcards";
 }
 
+function getSafeDisplayName(profile, session) {
+  if (!profile && !session) return "Student";
+  
+  if (profile) {
+    if (typeof profile === "string") {
+      try {
+        const parsed = JSON.parse(profile.startsWith("JSON:") ? profile.slice(5) : profile);
+        return parsed.display_name || parsed.username || profile;
+      } catch {
+        return profile;
+      }
+    }
+    
+    if (typeof profile === "object") {
+      return profile.display_name || profile.username || "Student";
+    }
+  }
+  
+  return session?.user?.user_metadata?.full_name || session?.user?.email?.split("@")[0] || "Student";
+}
+
 export default function App() {
   const [session, setSession] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [exploreAnon, setExploreAnon] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
   const [saveStatus, setSaveStatus] = useState("");
   const [profile, setProfile] = useState(null);
@@ -1243,6 +1266,33 @@ export default function App() {
     return <div className="min-h-screen p-6" />;
   }
 
+  // Show landing page unless user logs in or explores anonymously
+  if (!session && !exploreAnon) {
+    return (
+      <>
+        <Landing
+          onLogin={() => setAuthModalOpen(true)}
+          onExplore={() => setExploreAnon(true)}
+        />
+        {authModalOpen && (
+          <div className="auth-modal-overlay" onClick={() => setAuthModalOpen(false)}>
+            <div className="auth-modal-box" onClick={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                className="auth-modal-close"
+                onClick={() => setAuthModalOpen(false)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+              <Auth />
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
+
   return (
     <div className="app-shell">
       {sidebarOpen && (
@@ -1260,7 +1310,7 @@ export default function App() {
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         userEmail={session?.user?.email}
-        username={profile?.username}
+        username={getSafeDisplayName(profile?.username || profile?.display_name, session)}
         onUsernameChange={(u) => handleProfileUpdate({ username: u })}
         onProfileClick={openProfile}
         onLoginClick={() => setAuthModalOpen(true)}

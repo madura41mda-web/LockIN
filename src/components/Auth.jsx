@@ -108,7 +108,15 @@ export default function Auth() {
 
   return (
     <div className="auth-shell">
-      <h2 className="feature-page-title">{isSignUp ? "Create account" : "Log in"}</h2>
+      <div className="auth-header">
+        <span className="auth-brand-mark" aria-hidden="true">L</span>
+        <h2 className="auth-title">{isSignUp ? "Create your account" : "Welcome back"}</h2>
+        <p className="auth-subtitle">
+          {isSignUp
+            ? "Save your decks and track your progress across every study mode."
+            : "Log in to pick up right where you left off."}
+        </p>
+      </div>
 
       <form onSubmit={handleSubmit} className="auth-form">
         {isSignUp && (
@@ -176,8 +184,8 @@ export default function Auth() {
           </>
         )}
 
-        {error && <p className="mt-2 text-red-400 text-sm mono">{error}</p>}
-        {message && <p className="mt-2 text-green-400 text-sm mono">{message}</p>}
+        {error && <p className="auth-message auth-message-error">{error}</p>}
+        {message && <p className="auth-message auth-message-success">{message}</p>}
 
         <button type="submit" disabled={loading} className="generate-btn">
           {loading ? "Please wait..." : isSignUp ? "Sign up" : "Log in"}
