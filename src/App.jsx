@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { BookOpen, Brain, Clock, Swords, Timer, Users } from "lucide-react";
+import { useEffect, useState } from "react";
+import { BookOpen, Brain, Clock, Swords, Timer } from "lucide-react";
 import Navbar from "./components/Navbar";
 import FileUpload from "./components/FileUpload";
 import ModuleSelector from "./components/ModuleSelector";
@@ -13,8 +13,6 @@ import MyLibrary from "./components/MyLibrary";
 import ProfileDashboard from "./components/ProfileDashboard";
 import BattleMode from "./components/battle/BattleMode";
 import FlowState, { TIMER_MODES } from "./components/FlowState";
-import StudyLobby from "./components/StudyLobby";
-import LobbyAudioRenderer from "./components/lobby/LobbyAudioRenderer";
 import { parseModules } from "./utils/parseModules";
 import {
   createGenerationBatches,
@@ -26,7 +24,6 @@ import {
 import { optionalUuid, persistedDocumentId } from "./utils/idValidation";
 import { useFlowAmbience, loadAmbiencePrefs } from "./utils/useFlowAmbience";
 import { supabase } from "./supabaseClient";
-import { useStudyLobby } from "./hooks/useStudyLobby";
 
 const FEATURES = [
   {
@@ -68,14 +65,6 @@ const FEATURES = [
     description: "Deep focus productivity timer with smart study intervals.",
     actionLabel: "Start Focus Session",
     icon: Timer,
-  },
-  {
-    id: "lobby",
-    label: "Study Lobby",
-    title: "Shared Study Room",
-    description: "Focus in real-time rooms with synced timers & status tracking.",
-    actionLabel: "Enter Study Lobby",
-    icon: Users,
   },
 ];
 
@@ -185,21 +174,6 @@ export default function App() {
   );
   const [flowIsMuted, setFlowIsMuted] = useState(Boolean(savedAmbiencePrefs.isMuted));
   const [flowResetSignal, setFlowResetSignal] = useState(0);
-
-  const lobbyCurrentAction = useMemo(() => {
-    if (flowIsRunning) return "Focusing";
-    if (activeMode === "quiz") return "Taking Quiz";
-    if (activeMode === "battle") return "Gladiating";
-    if (activeMode === "flashcards") return "Reviewing Cards";
-    if (activeMode === "revision") return "Revising Notes";
-    return "Idle";
-  }, [activeMode, flowIsRunning]);
-
-  const studyLobby = useStudyLobby({
-    session,
-    profile,
-    currentAction: lobbyCurrentAction,
-  });
 
   const { isLoading: flowAmbienceLoading, error: flowAmbienceError } = useFlowAmbience({
     activeSound: flowActiveSound,
@@ -1105,27 +1079,20 @@ export default function App() {
 
   // Save handlers — gated behind login via requireLogin
   function handleSaveQuizResult() {
-    requireLogin(async () => {
-      setSaveStatus("Saving...");
-      const { error } = await supabase.from("quiz_attempts").insert({
-        user_id: session.user.id,
-        module_name: displayModuleName,
-        subject: displayModuleName,
-        score: quizSummaryData.score,
-        total_questions: quizSummaryData.total,
-        questions: quizQuestions,
-        document_id: currentPersistedDocumentId("quiz_attempts.document_id"),
-      });
-      if (error) {
-        console.error("Supabase Error [Save Quiz Attempt]:", {
-          message: error.message,
-          code: error.code,
-          details: error.details,
-          hint: error.hint
-        });
-        setSaveStatus("Could not save. Try again.");
-      } else {
+    requireLogin(() => {
+      if (saveStatus === "Saved!") {
         setSaveStatus("Saved!");
+        return;
+      }
+
+      if (saveStatus === "Saving...") {
+        return;
+      }
+
+      if (saveStatus === "Saved locally") {
+        setSaveStatus("Saved locally");
+      } else {
+        setSaveStatus("Could not save to cloud.");
       }
     });
   }
@@ -1239,10 +1206,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen p-6">
-      <LobbyAudioRenderer
-        tracks={studyLobby.communication.remoteAudioTracks}
-        onPlaybackError={studyLobby.communication.setAudioError}
-      />
       <Navbar
         userEmail={session?.user?.email}
         onLoginClick={() => setAuthModalOpen(true)}
@@ -1331,12 +1294,6 @@ export default function App() {
             setPendingBattleCode(null);
           }}
           onFileRead={handleFileRead}
-        />
-      ) : activeMode === "lobby" ? (
-        <StudyLobby
-          session={session}
-          lobby={studyLobby}
-          onClose={() => switchMode("flashcards")}
         />
       ) : (
         <main className="feature-page">

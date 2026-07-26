@@ -2,9 +2,6 @@ import { useEffect, useRef, useState } from "react";
 
 // Root-relative so the same path resolves correctly in both `vite dev` and a
 // production build — anything in /public is served from "/" in both modes.
-// NOTE: these files are not included in the repo. Drop matching audio into
-// public/sounds/ (rain.mp3, forest.mp3, ocean.mp3, fireplace.mp3,
-// instrumental.mp3) — short (30–90s), seamlessly loopable, .mp3 or .ogg.
 export const SOUND_ASSETS = {
   rain: "/sounds/rain.mp3",
   forest: "/sounds/forest.mp3",
@@ -48,206 +45,11 @@ function savePrefs(prefs) {
  * @param {boolean} isMuted
  * @param {number} stopSignal - bump this (e.g. session-end count) to force a stop
  */
-// Web Audio ambient synthesizer fallback
-let audioCtx = null;
-let activeSynthNodes = [];
-
-function stopSynth() {
-  if (activeSynthNodes.length > 0) {
-    activeSynthNodes.forEach(node => {
-      try {
-        if (node.stop) node.stop();
-        if (node.disconnect) node.disconnect();
-      } catch (e) {}
-    });
-    activeSynthNodes = [];
-  }
-}
-
-function startSynth(type, volumeValue, isMuted) {
-  stopSynth();
-  try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-    if (!audioCtx) {
-      audioCtx = new AudioContextClass();
-    }
-    if (audioCtx.state === "suspended") {
-      audioCtx.resume();
-    }
-
-    const mainGain = audioCtx.createGain();
-    const activeVol = isMuted ? 0 : volumeValue * 0.15;
-    mainGain.gain.setValueAtTime(activeVol, audioCtx.currentTime);
-    mainGain.connect(audioCtx.destination);
-    activeSynthNodes.push(mainGain);
-
-    // Create a 2-second white noise buffer
-    const bufferSize = audioCtx.sampleRate * 2;
-    const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-    const output = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      output[i] = Math.random() * 2 - 1;
-    }
-
-    const noiseSource = audioCtx.createBufferSource();
-    noiseSource.buffer = noiseBuffer;
-    noiseSource.loop = true;
-
-    if (type === "rain") {
-      const filter = audioCtx.createBiquadFilter();
-      filter.type = "lowpass";
-      filter.frequency.setValueAtTime(700, audioCtx.currentTime);
-
-      const lfo = audioCtx.createOscillator();
-      lfo.frequency.setValueAtTime(0.25, audioCtx.currentTime);
-      const lfoGain = audioCtx.createGain();
-      lfoGain.gain.setValueAtTime(150, audioCtx.currentTime);
-
-      lfo.connect(lfoGain);
-      lfoGain.connect(filter.frequency);
-      noiseSource.connect(filter);
-      filter.connect(mainGain);
-
-      lfo.start();
-      noiseSource.start();
-      activeSynthNodes.push(lfo, noiseSource);
-    } else if (type === "ocean") {
-      const filter = audioCtx.createBiquadFilter();
-      filter.type = "lowpass";
-      filter.frequency.setValueAtTime(350, audioCtx.currentTime);
-
-      const swell = audioCtx.createGain();
-      swell.gain.setValueAtTime(0.3, audioCtx.currentTime);
-
-      const lfo = audioCtx.createOscillator();
-      lfo.frequency.setValueAtTime(0.08, audioCtx.currentTime);
-      const lfoGain = audioCtx.createGain();
-      lfoGain.gain.setValueAtTime(0.2, audioCtx.currentTime);
-
-      lfo.connect(lfoGain);
-      lfoGain.connect(swell.gain);
-      noiseSource.connect(filter);
-      filter.connect(swell);
-      swell.connect(mainGain);
-
-      lfo.start();
-      noiseSource.start();
-      activeSynthNodes.push(lfo, noiseSource);
-    } else if (type === "fireplace") {
-      const filter = audioCtx.createBiquadFilter();
-      filter.type = "bandpass";
-      filter.frequency.setValueAtTime(150, audioCtx.currentTime);
-      filter.Q.setValueAtTime(1.0, audioCtx.currentTime);
-
-      noiseSource.connect(filter);
-      filter.connect(mainGain);
-      noiseSource.start();
-      activeSynthNodes.push(noiseSource);
-
-      const crackleTimer = setInterval(() => {
-        if (!audioCtx || audioCtx.state === "suspended") return;
-        if (Math.random() > 0.4) {
-          const popOsc = audioCtx.createOscillator();
-          const popGain = audioCtx.createGain();
-          popOsc.type = "triangle";
-          popOsc.frequency.setValueAtTime(250 + Math.random() * 900, audioCtx.currentTime);
-          popGain.gain.setValueAtTime(0.03 + Math.random() * 0.12, audioCtx.currentTime);
-          popGain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.03 + Math.random() * 0.04);
-          popOsc.connect(popGain);
-          popGain.connect(mainGain);
-          popOsc.start();
-          popOsc.stop(audioCtx.currentTime + 0.12);
-        }
-      }, 180);
-
-      activeSynthNodes.push({ stop: () => clearInterval(crackleTimer) });
-    } else if (type === "forest") {
-      const filter = audioCtx.createBiquadFilter();
-      filter.type = "lowpass";
-      filter.frequency.setValueAtTime(450, audioCtx.currentTime);
-
-      const windGain = audioCtx.createGain();
-      windGain.gain.setValueAtTime(0.35, audioCtx.currentTime);
-
-      noiseSource.connect(filter);
-      filter.connect(windGain);
-      windGain.connect(mainGain);
-      noiseSource.start();
-      activeSynthNodes.push(noiseSource);
-
-      const birdTimer = setInterval(() => {
-        if (!audioCtx || audioCtx.state === "suspended") return;
-        if (Math.random() > 0.65) {
-          const time = audioCtx.currentTime;
-          const chirpOsc = audioCtx.createOscillator();
-          const chirpGain = audioCtx.createGain();
-          chirpOsc.type = "sine";
-          chirpOsc.frequency.setValueAtTime(1300 + Math.random() * 250, time);
-          chirpOsc.frequency.exponentialRampToValueAtTime(3200 + Math.random() * 400, time + 0.12);
-
-          chirpGain.gain.setValueAtTime(0.015, time);
-          chirpGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.12);
-
-          chirpOsc.connect(chirpGain);
-          chirpGain.connect(mainGain);
-          chirpOsc.start();
-          chirpOsc.stop(time + 0.13);
-        }
-      }, 2500);
-
-      activeSynthNodes.push({ stop: () => clearInterval(birdTimer) });
-    } else if (type === "instrumental") {
-      const notes = [174.61, 196.00, 220.00, 261.63, 293.66, 349.23, 392.00, 440.00];
-
-      const triggerVoice = (freq) => {
-        if (!audioCtx || audioCtx.state === "suspended") return;
-        const osc = audioCtx.createOscillator();
-        const voiceGain = audioCtx.createGain();
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-
-        voiceGain.gain.setValueAtTime(0, audioCtx.currentTime);
-        voiceGain.gain.linearRampToValueAtTime(0.03, audioCtx.currentTime + 3);
-        voiceGain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 8);
-
-        osc.connect(voiceGain);
-        voiceGain.connect(mainGain);
-        osc.start();
-        osc.stop(audioCtx.currentTime + 8.1);
-      };
-
-      notes.slice(0, 3).forEach((n) => triggerVoice(n));
-
-      const droneTimer = setInterval(() => {
-        if (!audioCtx || audioCtx.state === "suspended") return;
-        const n = notes[Math.floor(Math.random() * notes.length)];
-        triggerVoice(n);
-      }, 5000);
-
-      activeSynthNodes.push({ stop: () => clearInterval(droneTimer) });
-    }
-  } catch (err) {
-    console.error("Web Audio synthesis failed:", err);
-  }
-}
-
-function updateSynthVolume(volumeValue, isMuted) {
-  if (activeSynthNodes.length > 0) {
-    const mainGain = activeSynthNodes[0];
-    if (mainGain && mainGain.gain && audioCtx) {
-      const targetGain = isMuted ? 0 : volumeValue * 0.15;
-      mainGain.gain.linearRampToValueAtTime(targetGain, audioCtx.currentTime + 0.15);
-    }
-  }
-}
-
 export function useFlowAmbience({ activeSound, isPlayingSound, volume, isMuted, stopSignal }) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const audioRef = useRef(null);
   const fadeIntervalRef = useRef(null);
-  const isSynthModeRef = useRef(false);
 
   function clearFade() {
     if (fadeIntervalRef.current) {
@@ -283,8 +85,6 @@ export function useFlowAmbience({ activeSound, isPlayingSound, volume, isMuted, 
 
   function teardown() {
     clearFade();
-    stopSynth();
-    isSynthModeRef.current = false;
     const audio = audioRef.current;
     if (audio) {
       audio.pause();
@@ -329,14 +129,8 @@ export function useFlowAmbience({ activeSound, isPlayingSound, volume, isMuted, 
 
     function handleError() {
       setIsLoading(false);
-      console.warn(`File loading failed for: ${src}. Falling back to synthesized ambience.`);
-      setError("Unable to load sound.");
-      
-      // Mark as synth mode and spin up synthesizer fallback
-      isSynthModeRef.current = true;
-      if (isPlayingSound) {
-        startSynth(activeSound, volume, isMuted);
-      }
+      console.error(`Flow State ambience failed to load: ${src}`);
+      setError("Unable to load this ambience track. Please choose another sound.");
     }
 
     audio.addEventListener("canplaythrough", handleCanPlay);
@@ -352,15 +146,6 @@ export function useFlowAmbience({ activeSound, isPlayingSound, volume, isMuted, 
 
   // Play / pause logic
   useEffect(() => {
-    if (isSynthModeRef.current) {
-      if (isPlayingSound) {
-        startSynth(activeSound, volume, isMuted);
-      } else {
-        stopSynth();
-      }
-      return;
-    }
-
     const audio = audioRef.current;
     if (!audio || !activeSound) return;
 
@@ -370,12 +155,13 @@ export function useFlowAmbience({ activeSound, isPlayingSound, volume, isMuted, 
       const playPromise = audio.play();
       if (playPromise?.catch) {
         playPromise
-          .then(() => fadeTo(audio, targetVolume))
+          .then(() => {
+            setError("");
+            fadeTo(audio, targetVolume);
+          })
           .catch((err) => {
-            console.error("Flow State ambience play() blocked:", err);
-            // Fallback to synth context activation on user gesture click
-            isSynthModeRef.current = true;
-            startSynth(activeSound, volume, isMuted);
+            console.warn("Flow State ambience play() blocked:", err);
+            setError("Your browser blocked audio playback. Press Play Audio to try again.");
           });
       } else {
         fadeTo(audio, targetVolume);
@@ -387,10 +173,6 @@ export function useFlowAmbience({ activeSound, isPlayingSound, volume, isMuted, 
 
   // Live volume updates
   useEffect(() => {
-    if (isSynthModeRef.current) {
-      updateSynthVolume(volume, isMuted);
-      return;
-    }
     const audio = audioRef.current;
     if (!audio || !isPlayingSound) return;
     fadeTo(audio, isMuted ? 0 : volume);
@@ -398,10 +180,6 @@ export function useFlowAmbience({ activeSound, isPlayingSound, volume, isMuted, 
 
   // External stop trigger
   useEffect(() => {
-    if (isSynthModeRef.current) {
-      stopSynth();
-      return;
-    }
     const audio = audioRef.current;
     if (!audio || stopSignal === undefined) return;
     fadeTo(audio, 0, () => audio.pause());
